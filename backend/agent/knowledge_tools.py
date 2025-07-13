@@ -5,6 +5,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import json
 import asyncio
+import re
+import time
 from smolagents import tool
 
 from knowledge.enhanced_knowledge_graph import get_enhanced_knowledge_graph
@@ -136,6 +138,412 @@ def _run_async_safely(coro):
         return asyncio.run(coro)
 
 
+def _extract_main_content(html: str, url: str) -> Dict[str, str]:
+    """
+    Extract main content from HTML, avoiding ads and navigation
+    Returns a dictionary with title, content, and summary
+    """
+    try:
+        from bs4 import BeautifulSoup
+        import urllib.parse
+        
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Remove unwanted elements
+        for element in soup(['script', 'style', 'nav', 'header', 'footer', 
+                           'aside', 'iframe', 'noscript', 'comment']):
+            element.decompose()
+        
+        # Remove elements with common ad/navigation classes
+        ad_classes = ['advertisement', 'ad', 'ads', 'sidebar', 'navigation', 
+                     'nav', 'menu', 'social', 'share', 'cookie', 'popup']
+        for class_name in ad_classes:
+            for element in soup.find_all(class_=re.compile(class_name, re.I)):
+                element.decompose()
+        
+        # Extract title
+        title = ""
+        if soup.title:
+            title = soup.title.get_text().strip()
+        elif soup.find('h1'):
+            title = soup.find('h1').get_text().strip()
+        
+        # Extract main content
+        content_candidates = []
+        
+        # Try common content containers first
+        for selector in ['article', '[role="main"]', 'main', '.content', '#content',
+                        '.post', '.entry', '.article']:
+            elements = soup.select(selector)
+            for element in elements:
+                text = element.get_text(separator=' ', strip=True)
+                if len(text) > 200:  # Only consider substantial content
+                    content_candidates.append(text)
+        
+        # If no main content found, get all paragraphs
+        if not content_candidates:
+            paragraphs = soup.find_all('p')
+            content_text = ' '.join([p.get_text(separator=' ', strip=True) 
+                                   for p in paragraphs if len(p.get_text(strip=True)) > 50])
+            if content_text:
+                content_candidates.append(content_text)
+        
+        # Use the longest content candidate
+        main_content = max(content_candidates, key=len) if content_candidates else ""
+        
+        # Clean up the content
+        main_content = re.sub(r'\s+', ' ', main_content).strip()
+        
+        # Create a summary (first 3 sentences or 300 chars, whichever is shorter)
+        sentences = re.split(r'[.!?]+', main_content)
+        summary_sentences = []
+        char_count = 0
+        
+        for sentence in sentences[:3]:
+            sentence = sentence.strip()
+            if sentence and char_count + len(sentence) < 300:
+                summary_sentences.append(sentence)
+                char_count += len(sentence)
+            else:
+                break
+        
+        summary = '. '.join(summary_sentences)
+        if summary and not summary.endswith('.'):
+            summary += '.'
+        
+        # Limit content length to avoid token bloat (keep ~500 words max)
+        if len(main_content) > 3000:
+            main_content = main_content[:3000] + "..."
+        
+        return {
+            "title": title or urllib.parse.urlparse(url).netloc,
+            "content": main_content,
+            "summary": summary or main_content[:300] + "..." if main_content else "",
+            "word_count": len(main_content.split()),
+            "url": url
+        }
+        
+    except Exception as e:
+        print(f"Error extracting content: {e}")
+        return {
+            "title": f"Content from {url}",
+            "content": "",
+            "summary": f"Failed to extract content from {url}: {str(e)}",
+            "word_count": 0,
+            "url": url
+        }
+
+
+def _generate_proper_wiki_links(content: str, target_category: str = None) -> str:
+    """
+    Generate proper Obsidian wiki-links in content by converting bare links to path-based links.
+    This ensures Obsidian can resolve the links correctly.
+    
+    Args:
+        content: The content containing wiki-links to fix
+        target_category: The category of the note being created (for context)
+        
+    Returns:
+        Content with properly formatted wiki-links
+    """
+    import re
+    
+    if not _knowledge_tools_manager.initialized:
+        return content
+    
+    def replace_wiki_link(match):
+        link_content = match.group(1).strip()
+        
+        # Skip if already has a path (contains '/')
+        if '/' in link_content:
+            return match.group(0)
+        
+        # Skip if it's a display link with |
+        if '|' in link_content:
+            target, display = link_content.split('|', 1)
+            target = target.strip()
+            display = display.strip()
+            
+            # Try to resolve the target using notes manager
+            proper_link = _knowledge_tools_manager.notes_manager.get_obsidian_wiki_link_for_note(target, target_category)
+            if proper_link != f"[[{target}]]":
+                # Extract path from proper link
+                path_match = re.match(r'\[\[([^\]]+)\]\]', proper_link)
+                if path_match:
+                    return f"[[{path_match.group(1)}|{display}]]"
+            
+            return match.group(0)
+        
+        # Try to resolve bare link using notes manager
+        proper_link = _knowledge_tools_manager.notes_manager.get_obsidian_wiki_link_for_note(link_content, target_category)
+        return proper_link
+    
+    # Pattern to match wiki-links
+    wiki_link_pattern = r'\[\[([^\]]+)\]\]'
+    return re.sub(wiki_link_pattern, replace_wiki_link, content)
+
+
+@tool
+def browse_web_content(url: str, save_to_notes: bool = True, category: Optional[str] = None, tags: Optional[List[str]] = None) -> str:
+    """
+    Browse a web URL and extract the main content, optionally saving it to knowledge base.
+    This tool fetches web content, extracts the main article/content, and provides a summary.
+    
+    Args:
+        url: The URL to browse and extract content from
+        save_to_notes: Whether to save the extracted content as a note (default: True)
+        category: Category for the note if saving (default: auto-categorized)
+        tags: Tags to add to the note if saving (default: auto-generated)
+        
+    Returns:
+        JSON string containing the extracted content, summary, and note information if saved
+    """
+    async def _browse():
+        if not _knowledge_tools_manager.initialized:
+            await _knowledge_tools_manager.initialize()
+        
+        try:
+            import httpx
+            from urllib.parse import urlparse, urljoin
+            import time
+            
+            # Validate URL
+            parsed_url = urlparse(url)
+            if not parsed_url.scheme or not parsed_url.netloc:
+                return json.dumps({
+                    "success": False,
+                    "error": "Invalid URL format. Please provide a complete URL with http:// or https://",
+                    "url": url
+                }, indent=2)
+            
+            print(f"🌐 Browsing URL: {url}")
+            
+            # Set up headers to mimic a real browser
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+            }
+            
+            # Fetch the content with timeout
+            async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                
+                # Check content type
+                content_type = response.headers.get('content-type', '').lower()
+                if 'text/html' not in content_type:
+                    return json.dumps({
+                        "success": False,
+                        "error": f"URL does not contain HTML content. Content type: {content_type}",
+                        "url": url
+                    }, indent=2)
+                
+                html_content = response.text
+            
+            print("📄 Extracting main content...")
+            
+            # Extract main content
+            extracted = _extract_main_content(html_content, url)
+            
+            if not extracted["content"]:
+                return json.dumps({
+                    "success": False,
+                    "error": "Could not extract meaningful content from the URL",
+                    "url": url,
+                    "title": extracted["title"]
+                }, indent=2)
+            
+            result = {
+                "success": True,
+                "url": url,
+                "title": extracted["title"],
+                "summary": extracted["summary"],
+                "content_preview": extracted["content"][:500] + "..." if len(extracted["content"]) > 500 else extracted["content"],
+                "word_count": extracted["word_count"],
+                "extracted_at": datetime.now().isoformat()
+            }
+            
+            # Save to notes if requested
+            if save_to_notes:
+                print("💾 Saving content to knowledge base...")
+                
+                # Auto-categorize if no category provided
+                if not category:
+                    categories = await _knowledge_tools_manager.categorizer.categorize(extracted["summary"])
+                    category = categories[0] if categories else "Web Content"
+                
+                # Auto-generate tags if none provided
+                if not tags:
+                    tags = ["web-content", "article"]
+                    # Add domain as tag
+                    domain = urlparse(url).netloc.replace('www.', '')
+                    if domain:
+                        tags.append(domain)
+                
+                # Create the note content with source attribution
+                note_content = f"""# {extracted['title']}
+
+**Source:** {url}
+**Extracted:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
+**Summary:** {extracted['summary']}
+
+---
+
+{extracted['content']}
+
+---
+*Content extracted from web source and may be truncated. Visit the original URL for complete content.*"""
+                
+                # Fix wiki-links in content for Obsidian compatibility
+                note_content = _generate_proper_wiki_links(note_content, category)
+                
+                # Create the note
+                note = await _knowledge_tools_manager.notes_manager.create_note(
+                    title=f"Web: {extracted['title'][:50]}..." if len(extracted['title']) > 50 else f"Web: {extracted['title']}",
+                    content=note_content,
+                    category=category,
+                    tags=tags
+                )
+                
+                # Add to knowledge graph
+                node_id = await _knowledge_tools_manager.knowledge_graph.add_note_from_content(
+                    title=note.title,
+                    content=note_content,
+                    category=category,
+                    tags=tags,
+                    file_path=note.path
+                )
+                
+                result.update({
+                    "note_created": True,
+                    "note": {
+                        "title": note.title,
+                        "category": category,
+                        "tags": tags,
+                        "path": note.path,
+                        "node_id": node_id,
+                        "obsidian_wiki_link": note.get_obsidian_wiki_link(_knowledge_tools_manager.notes_manager.notes_directory)
+                    }
+                })
+                
+                print(f"✅ Created note: {note.title}")
+            else:
+                result["note_created"] = False
+            
+            return json.dumps(result, indent=2)
+            
+        except httpx.TimeoutException:
+            return json.dumps({
+                "success": False,
+                "error": "Request timed out. The website took too long to respond.",
+                "url": url
+            }, indent=2)
+        except httpx.HTTPStatusError as e:
+            return json.dumps({
+                "success": False,
+                "error": f"HTTP error {e.response.status_code}: {e.response.reason_phrase}",
+                "url": url
+            }, indent=2)
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "error": f"Error browsing URL: {str(e)}",
+                "url": url
+            }, indent=2)
+    
+    return _run_async_safely(_browse())
+
+
+@tool
+def summarize_web_links(text_with_links: str, auto_save: bool = True) -> str:
+    """
+    Extract URLs from text and summarize their content for knowledge augmentation.
+    Useful for processing text that contains multiple links that should be researched.
+    
+    Args:
+        text_with_links: Text containing one or more URLs to be processed
+        auto_save: Whether to automatically save summaries to knowledge base (default: True)
+        
+    Returns:
+        JSON string containing summaries of all found links and their integration status
+    """
+    async def _summarize_links():
+        if not _knowledge_tools_manager.initialized:
+            await _knowledge_tools_manager.initialize()
+        
+        # Extract URLs from text
+        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+        urls = re.findall(url_pattern, text_with_links)
+        
+        if not urls:
+            return json.dumps({
+                "success": False,
+                "error": "No valid URLs found in the provided text",
+                "text_preview": text_with_links[:200] + "..." if len(text_with_links) > 200 else text_with_links
+            }, indent=2)
+        
+        print(f"🔗 Found {len(urls)} URLs to process")
+        
+        results = {
+            "success": True,
+            "total_urls": len(urls),
+            "processed_urls": [],
+            "failed_urls": [],
+            "notes_created": 0,
+            "processing_time": time.time()
+        }
+        
+        for i, url in enumerate(urls[:5]):  # Limit to 5 URLs to avoid overwhelming
+            print(f"🌐 Processing URL {i+1}/{min(len(urls), 5)}: {url}")
+            
+            try:
+                # Use the browse_web_content function
+                browse_result = json.loads(await _browse_single_url(url, auto_save))
+                
+                if browse_result["success"]:
+                    results["processed_urls"].append({
+                        "url": url,
+                        "title": browse_result["title"],
+                        "summary": browse_result["summary"],
+                        "word_count": browse_result["word_count"],
+                        "note_created": browse_result.get("note_created", False)
+                    })
+                    
+                    if browse_result.get("note_created"):
+                        results["notes_created"] += 1
+                else:
+                    results["failed_urls"].append({
+                        "url": url,
+                        "error": browse_result["error"]
+                    })
+                
+                # Small delay between requests to be respectful
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                results["failed_urls"].append({
+                    "url": url,
+                    "error": str(e)
+                })
+        
+        if len(urls) > 5:
+            results["note"] = f"Only processed first 5 URLs out of {len(urls)} found to avoid overwhelming the system"
+        
+        results["processing_time"] = round(time.time() - results["processing_time"], 2)
+        
+        return json.dumps(results, indent=2)
+    
+    async def _browse_single_url(url, save_to_notes):
+        """Helper function to browse a single URL"""
+        return browse_web_content(url, save_to_notes=save_to_notes)
+    
+    return _run_async_safely(_summarize_links())
+
+
 @tool
 def process_and_categorize_content(content: str, title: Optional[str] = None) -> str:
     """
@@ -176,12 +584,16 @@ def process_and_categorize_content(content: str, title: Optional[str] = None) ->
         )
         best_category = categories[0] if categories else "Quick Notes"
         
+        # Fix wiki-links in content for Obsidian compatibility
+        fixed_content = _generate_proper_wiki_links(content, best_category)
+        
         result = {
             "processed_content": processed_content,
             "category": best_category,
             "all_categories": categories,
             "title": title or processed_content.get("title", ""),
-            "content_hash": content_hash
+            "content_hash": content_hash,
+            "fixed_content": fixed_content
         }
         
         result_json = json.dumps(result, indent=2)
@@ -220,10 +632,13 @@ def create_knowledge_note(content: str, category: str, title: Optional[str] = No
         if not _knowledge_tools_manager.initialized:
             await _knowledge_tools_manager.initialize()
         
+        # Fix wiki-links in content for Obsidian compatibility
+        fixed_content = _generate_proper_wiki_links(content, category)
+        
         # Create the note
         note = await _knowledge_tools_manager.notes_manager.create_note(
             title=title or f"Note from {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            content=content,
+            content=fixed_content,
             category=category,
             tags=tags or []
         )
@@ -231,7 +646,7 @@ def create_knowledge_note(content: str, category: str, title: Optional[str] = No
         # Add to enhanced knowledge graph
         node_id = await _knowledge_tools_manager.knowledge_graph.add_note_from_content(
             title=note.title,
-            content=content,
+            content=fixed_content,
             category=category,
             tags=note.tags,
             file_path=note.path
@@ -242,6 +657,7 @@ def create_knowledge_note(content: str, category: str, title: Optional[str] = No
             "note": note.to_dict(),
             "knowledge_node_id": node_id,
             "message": f"Created note: {note.title}",
+            "obsidian_wiki_link": note.get_obsidian_wiki_link(_knowledge_tools_manager.notes_manager.notes_directory),
             "cached": False
         }, indent=2)
     
@@ -285,9 +701,21 @@ def update_knowledge_note(note_path: str, additional_content: str) -> str:
         except Exception as e:
             print(f"Warning: Could not check for content changes: {e}")
         
+        # Fix wiki-links in additional content for Obsidian compatibility
+        # Get category from existing note if available
+        target_category = None
+        try:
+            current_note = _knowledge_tools_manager.notes_manager.notes_index.get(note_path)
+            if current_note:
+                target_category = current_note.category
+        except:
+            pass
+        
+        fixed_additional_content = _generate_proper_wiki_links(additional_content, target_category)
+        
         # Update the note
         note = await _knowledge_tools_manager.notes_manager.update_note(
-            note_path, additional_content
+            note_path, fixed_additional_content
         )
         
         # Update enhanced knowledge graph
@@ -304,6 +732,7 @@ def update_knowledge_note(note_path: str, additional_content: str) -> str:
             "note": note.to_dict(),
             "knowledge_node_id": node_id,
             "message": f"Updated note: {note.title}",
+            "obsidian_wiki_link": note.get_obsidian_wiki_link(_knowledge_tools_manager.notes_manager.notes_directory),
             "cached": False
         }, indent=2)
     
@@ -353,6 +782,38 @@ def search_knowledge(query: str, limit: int = 10) -> str:
         }, indent=2)
     
     return _run_async_safely(_search())
+
+
+@tool
+def search_content_in_files(query: str, case_sensitive: bool = False, limit: int = 10) -> str:
+    """
+    Search for specific content within note files using grep-like functionality.
+    Use this when you need to find exact text or patterns within the actual file contents.
+    
+    Args:
+        query: The text or regex pattern to search for in file contents
+        case_sensitive: Whether the search should be case sensitive (default: False)
+        limit: Maximum number of files to return (default: 10)
+        
+    Returns:
+        JSON string containing search results with matches and context
+    """
+    async def _search_content():
+        if not _knowledge_tools_manager.initialized:
+            await _knowledge_tools_manager.initialize()
+        
+        # Search file contents directly
+        results = await _knowledge_tools_manager.knowledge_graph.search_content_in_files(query, case_sensitive, limit)
+        
+        return json.dumps({
+            "query": query,
+            "case_sensitive": case_sensitive,
+            "results": results,
+            "total_files_found": len(results),
+            "total_matches": sum(r.get('total_matches', 0) for r in results)
+        }, indent=2)
+    
+    return _run_async_safely(_search_content())
 
 
 @tool
@@ -630,6 +1091,7 @@ KNOWLEDGE_TOOLS = [
     create_knowledge_note,
     update_knowledge_note,
     search_knowledge,
+    search_content_in_files,
     find_related_notes,
     get_knowledge_graph_data,
     get_all_notes,
@@ -637,5 +1099,7 @@ KNOWLEDGE_TOOLS = [
     decide_note_action,
     get_cache_stats,
     clear_cache,
-    rebuild_cache
+    rebuild_cache,
+    browse_web_content,
+    summarize_web_links
 ] 

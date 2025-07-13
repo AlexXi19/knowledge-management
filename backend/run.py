@@ -119,12 +119,26 @@ def main():
         if is_dev:
             print("🔄 Hot reload enabled for development")
         else:
-            print("🏭 Production mode - use --dev flag for hot reload")
+            print("🏭 Production mode")
             
+        print("⚡ Single worker with asyncio concurrency (Node.js-style)")
+        print("🚀 Non-blocking request processing enabled")
         print("\nPress Ctrl+C to stop the server")
         print("=" * 70)
         
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info", reload=is_dev)
+        # Single worker with asyncio concurrency - like Node.js
+        uvicorn.run(
+            app, 
+            host="0.0.0.0", 
+            port=8000, 
+            log_level="info", 
+            reload=is_dev,
+            access_log=True,
+            loop="asyncio",  # Use asyncio event loop for concurrency
+            http="httptools",  # Fast HTTP processing
+            ws="websockets",  # WebSocket support
+            lifespan="on"  # Enable lifespan events
+        )
         
     except KeyboardInterrupt:
         print("\n👋 Shutting down gracefully...")

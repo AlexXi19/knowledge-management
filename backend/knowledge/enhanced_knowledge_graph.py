@@ -180,20 +180,20 @@ class EnhancedKnowledgeGraph:
             print(f"Error saving enhanced graph: {e}")
             
     def _rebuild_networkx_graph(self):
-        """Rebuild the NetworkX graph from our indexes"""
+        """Rebuild the NetworkX graph from our indexes (without content for efficiency)"""
         self.graph.clear()
         
-        # Add nodes
+        # Add nodes (excluding content for memory efficiency)
         for node in self.nodes_by_id.values():
             self.graph.add_node(node.id, **{
                 'title': node.title,
-                'content': node.content,
                 'category': node.category,
                 'tags': node.tags,
-                'metadata': node.metadata,
+                'file_path': node.file_path,
                 'content_hash': node.content_hash,
                 'created_at': node.created_at,
-                'updated_at': node.updated_at
+                'updated_at': node.updated_at,
+                'metadata': node.metadata
             })
         
         # Add edges
@@ -384,30 +384,78 @@ class EnhancedKnowledgeGraph:
         print(f"🔗 Wiki-link resolution complete: {resolved_count} resolved, {broken_count} broken")
     
     def _resolve_wiki_link_target(self, target: str) -> Optional[str]:
-        """Resolve a wiki-link target to a node ID using multiple strategies"""
+        """Resolve a wiki-link target to a node ID using multiple strategies including path-based resolution"""
         # Strategy 1: Exact match
         if target in self.title_to_id:
             return self.title_to_id[target]
         
-        # Strategy 2: Case-insensitive match
+        # Strategy 2: Path-based resolution (for links like "ideas/note-title")
+        if '/' in target:
+            # This is a path-based link, try to find by file path
+            for node in self.nodes_by_id.values():
+                if node.file_path:
+                    try:
+                        # Get relative path from notes directory
+                        notes_path = Path(os.getenv("NOTES_DIRECTORY", "./notes"))
+                        file_path = Path(node.file_path)
+                        relative_path = file_path.relative_to(notes_path)
+                        # Remove .md extension for comparison
+                        wiki_path = str(relative_path).replace('.md', '')
+                        
+                        if wiki_path == target or wiki_path.lower() == target.lower():
+                            return node.id
+                    except:
+                        continue
+        
+        # Strategy 3: Case-insensitive match
         target_lower = target.lower()
         for title, node_id in self.title_to_id.items():
             if title.lower() == target_lower:
                 return node_id
         
-        # Strategy 3: Partial match (contains)
+        # Strategy 4: Partial match (contains)
         for title, node_id in self.title_to_id.items():
             if target_lower in title.lower() or title.lower() in target_lower:
                 return node_id
         
-        # Strategy 4: Remove common separators and try again
+        # Strategy 5: Remove common separators and try again
         cleaned_target = target.replace('-', ' ').replace('_', ' ').strip()
         for title, node_id in self.title_to_id.items():
             cleaned_title = title.replace('-', ' ').replace('_', ' ').strip()
             if cleaned_target.lower() == cleaned_title.lower():
                 return node_id
         
+        # Strategy 6: Try to match just the filename part of a path-based link
+        if '/' in target:
+            filename_part = target.split('/')[-1]
+            return self._resolve_wiki_link_target(filename_part)  # Recursive call with just filename
+        
         return None
+    
+    def generate_obsidian_wiki_link(self, node_id: str) -> str:
+        """
+        Generate a proper Obsidian wiki-link for a node that will resolve correctly.
+        Returns the link in format [[category/note-title]] or [[note-title]] for root notes.
+        """
+        if node_id not in self.nodes_by_id:
+            return f"[[{node_id}]]"
+        
+        node = self.nodes_by_id[node_id]
+        
+        try:
+            if node.file_path:
+                # Get relative path from notes directory
+                notes_path = Path(self.notes_directory)
+                file_path = Path(node.file_path)
+                relative_path = file_path.relative_to(notes_path)
+                # Remove .md extension for wiki-link
+                wiki_path = str(relative_path).replace('.md', '')
+                return f"[[{wiki_path}]]"
+        except Exception as e:
+            print(f"Error generating wiki-link for {node.title}: {e}")
+        
+        # Fallback to title
+        return f"[[{node.title}]]"
     
     async def add_note_from_content(self, title: str, content: str, category: str, tags: List[str] = None, file_path: str = None) -> str:
         """Add a note from content (for agent-generated notes)"""
@@ -480,6 +528,95 @@ class EnhancedKnowledgeGraph:
         except Exception as e:
             print(f"Error in semantic search: {e}")
             return []
+    
+    async def search_content_in_files(self, query: str, case_sensitive: bool = False, limit: int = 10) -> List[Dict[str, Any]]:
+        """Search for content in actual files using grep-like functionality"""
+        import re
+        import asyncio
+        
+        search_results = []
+        notes_path = Path(self.notes_directory)
+        
+        if not notes_path.exists():
+            return search_results
+        
+        # Prepare regex pattern
+        pattern_flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            pattern = re.compile(query, pattern_flags)
+        except re.error:
+            # If regex fails, escape the query and search as literal text
+            pattern = re.compile(re.escape(query), pattern_flags)
+        
+        try:
+            for md_file in notes_path.rglob("*.md"):
+                try:
+                    # Get corresponding node for metadata
+                    node = None
+                    for n in self.nodes_by_id.values():
+                        if n.file_path == str(md_file):
+                            node = n
+                            break
+                    
+                    if not node:
+                        continue
+                    
+                    # Read file content
+                    with open(md_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Search for matches
+                    matches = []
+                    for line_num, line in enumerate(content.split('\n'), 1):
+                        if pattern.search(line):
+                            matches.append({
+                                'line_number': line_num,
+                                'line_content': line.strip(),
+                                'context': self._get_line_context(content.split('\n'), line_num - 1, context_lines=2)
+                            })
+                            
+                            if len(matches) >= 5:  # Limit matches per file
+                                break
+                    
+                    if matches:
+                        search_results.append({
+                            'node_id': node.id,
+                            'title': node.title,
+                            'category': node.category,
+                            'file_path': node.file_path,
+                            'content_hash': node.content_hash,
+                            'matches': matches,
+                            'total_matches': len(matches),
+                            'tags': node.tags,
+                            'updated_at': node.updated_at
+                        })
+                    
+                    if len(search_results) >= limit:
+                        break
+                        
+                except Exception as e:
+                    print(f"Error searching in file {md_file}: {e}")
+                    continue
+        
+        except Exception as e:
+            print(f"Error in content search: {e}")
+        
+        # Sort by number of matches (descending)
+        search_results.sort(key=lambda x: x['total_matches'], reverse=True)
+        
+        return search_results
+    
+    def _get_line_context(self, lines: List[str], line_index: int, context_lines: int = 2) -> str:
+        """Get context around a specific line"""
+        start = max(0, line_index - context_lines)
+        end = min(len(lines), line_index + context_lines + 1)
+        
+        context_with_numbers = []
+        for i in range(start, end):
+            prefix = ">>> " if i == line_index else "    "
+            context_with_numbers.append(f"{prefix}{i+1}: {lines[i]}")
+        
+        return '\n'.join(context_with_numbers)
     
     async def get_backlinks(self, node_id: str) -> List[Dict[str, Any]]:
         """Get all nodes that link to this node"""
@@ -582,20 +719,18 @@ class EnhancedKnowledgeGraph:
         nodes = []
         edges = []
         
-        # Convert nodes for visualization
+        # Convert nodes for visualization (excluding content for efficiency)
         for node in self.nodes_by_id.values():
             nodes.append({
                 'id': node.id,
-                'title': node.title,  # Add title at top level for frontend
-                'content': node.content,
+                'title': node.title,
                 'category': node.category,
+                'tags': node.tags,
+                'file_path': node.file_path,
+                'content_hash': node.content_hash,
+                'created_at': node.created_at,
+                'updated_at': node.updated_at,
                 'metadata': {
-                    'title': node.title,
-                    'tags': node.tags,
-                    'created_at': node.created_at,
-                    'updated_at': node.updated_at,
-                    'file_path': node.file_path,
-                    'content_hash': node.content_hash,
                     **node.metadata
                 }
             })

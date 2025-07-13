@@ -203,7 +203,10 @@ uv run python test_smolagents_integration.py
 
 ### Core Endpoints
 
-- `POST /chat` - Chat with the AI agent
+- `POST /chat` - Chat with the AI agent (non-blocking)
+- `POST /chat/async` - Start background chat processing
+- `GET /chat/task/{task_id}` - Check background task status
+- `POST /chat/stream` - Real-time streaming chat
 - `GET /notes` - Get all notes
 - `GET /knowledge/graph` - Get knowledge graph data
 - `GET /search` - Search knowledge base
@@ -214,11 +217,30 @@ uv run python test_smolagents_integration.py
 - `GET /agent/logs` - Agent execution logs
 - `POST /agent/reset` - Reset agent memory
 
+### Task Management
+
+- `GET /tasks` - List active background tasks
+- `DELETE /tasks/{task_id}` - Cancel running task
+
 ### Cache Management
 
 - `GET /cache/stats` - Cache statistics and performance metrics
 - `POST /cache/clear` - Clear cache (requires confirmation)
 - `POST /cache/rebuild` - Rebuild entire cache
+
+### Concurrency Features
+
+The server now supports:
+
+- **AsyncIO Concurrency**: Single worker with asyncio event loop (Node.js-style)
+- **Non-blocking requests**: Long-running chat operations don't block other endpoints
+- **Background processing**: Use `/chat/async` for non-blocking chat with polling
+- **Streaming**: `/chat/stream` provides live updates without blocking
+- **Shared state**: Knowledge graph and caches efficiently shared in single process
+
+This approach is similar to Node.js - single-threaded with an event loop for concurrent I/O operations, making it perfect for the file system and API operations that dominate this knowledge management system.
+
+See `CONCURRENCY_IMPROVEMENTS.md` for detailed technical information.
 
 ## 🔧 Configuration
 

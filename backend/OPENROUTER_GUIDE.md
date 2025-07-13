@@ -1,384 +1,325 @@
 # OpenRouter Integration Guide
 
-## Overview
+This guide explains how to use OpenRouter with your knowledge management system, including the recent fixes and proper setup instructions.
 
-OpenRouter provides access to 200+ AI models through a single, unified API with competitive pricing. This guide covers how to integrate OpenRouter with your knowledge management system for maximum flexibility and cost savings.
+## 🚨 Fixed Issues
 
-## 🌟 Why OpenRouter?
+The OpenRouter integration has been **fixed** in the latest version. Previous issues were:
 
-### 📊 **Model Diversity**
+1. **Incorrect model naming**: Models need to be prefixed with `openrouter/`
+2. **Wrong base URL configuration**: Should use environment variables, not constructor parameters
+3. **Missing optional headers**: Site URL and app name were not properly configured
 
-- **200+ Models Available** - Claude, GPT, Llama, Gemini, and specialized models
-- **All Major Providers** - Anthropic, OpenAI, Meta, Google, Mistral, and more
-- **Cutting-edge Models** - Access to latest releases often before direct APIs
-- **Specialized Models** - Web-search enabled, reasoning-focused, and domain-specific models
+## 🛠️ Setup Instructions
 
-### 💰 **Cost Benefits**
+### 1. Environment Variables
 
-- **50%+ Savings** - Significantly cheaper than direct provider APIs
-- **No Minimums** - Pay only for what you use
-- **Transparent Pricing** - Clear per-token costs for all models
-- **Free Tier** - Get started with free credits
-
-### 🔧 **Developer Experience**
-
-- **Unified API** - One interface for all models
-- **OpenAI Compatible** - Drop-in replacement for OpenAI API
-- **Model Switching** - Change models with single environment variable
-- **Rate Limiting** - Built-in queue management
-- **Usage Analytics** - Detailed cost and usage tracking
-
-## 🚀 Quick Setup
-
-### 1. Get OpenRouter API Key
-
-1. Visit [openrouter.ai](https://openrouter.ai)
-2. Sign up for an account
-3. Navigate to [Keys](https://openrouter.ai/keys)
-4. Generate a new API key
-5. Add credits to your account (or use free tier)
-
-### 2. Configure Environment
+Set these environment variables in your system or `.env` file:
 
 ```bash
-# Set your OpenRouter API key
-export OPENROUTER_API_KEY=sk-or-v1-your-key-here
+# Required
+OPENROUTER_API_KEY=your_openrouter_api_key_here
 
-# Choose your preferred model (optional)
-export OPENROUTER_MODEL=anthropic/claude-3.5-sonnet  # Default
+# Optional - Model selection (defaults to anthropic/claude-3.5-sonnet)
+OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
 
-# Start the system
-uv run python run.py
+# Optional - For OpenRouter rankings (recommended)
+OR_SITE_URL=https://your-website.com
+OR_APP_NAME=Knowledge-Management-System
+
+# Optional - Enable debug mode for troubleshooting
+DEBUG=true
 ```
 
-### 3. Verify Setup
+### 2. Get Your OpenRouter API Key
 
-Check the startup logs for:
+1. Go to [OpenRouter.ai](https://openrouter.ai)
+2. Sign up or log in
+3. Navigate to your API keys section
+4. Create a new API key
+5. Add some credits to your account
 
-```
-✅ Using OpenRouter model: anthropic/claude-3.5-sonnet
-```
+### 3. Available Models
 
-## 📋 Available Models
-
-### **Recommended for Knowledge Management**
-
-#### **Claude Models (Best for Analysis)**
+Popular models you can use with OpenRouter:
 
 ```bash
-# Latest Claude 3.5 Sonnet (Recommended)
-export OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
-# Cost: ~$3.00 per 1M input tokens, $15.00 per 1M output tokens
+# Anthropic Claude models
+OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
+OPENROUTER_MODEL=anthropic/claude-3.5-haiku
 
-# Claude 3 Haiku (Fast & Cheap)
-export OPENROUTER_MODEL=anthropic/claude-3-haiku
-# Cost: ~$0.25 per 1M input tokens, $1.25 per 1M output tokens
+# OpenAI models
+OPENROUTER_MODEL=openai/gpt-4o
+OPENROUTER_MODEL=openai/gpt-4o-mini
 
-# Claude 3 Opus (Most Capable)
-export OPENROUTER_MODEL=anthropic/claude-3-opus
-# Cost: ~$15.00 per 1M input tokens, $75.00 per 1M output tokens
+# Open source models (often cheaper/free)
+OPENROUTER_MODEL=meta-llama/llama-3.1-8b-instruct:free
+OPENROUTER_MODEL=google/gemini-flash-1.5
+OPENROUTER_MODEL=microsoft/wizardlm-2-8x22b
 ```
 
-#### **GPT Models (Versatile)**
+### 4. Testing Your Setup
+
+Run the test script to verify everything works:
 
 ```bash
-# GPT-4o (Latest OpenAI)
-export OPENROUTER_MODEL=openai/gpt-4o
-# Cost: ~$2.50 per 1M input tokens, $10.00 per 1M output tokens
-
-# GPT-4o Mini (Fast & Cheap)
-export OPENROUTER_MODEL=openai/gpt-4o-mini
-# Cost: ~$0.15 per 1M input tokens, $0.60 per 1M output tokens
-
-# GPT-4 Turbo
-export OPENROUTER_MODEL=openai/gpt-4-turbo
-# Cost: ~$10.00 per 1M input tokens, $30.00 per 1M output tokens
+cd backend
+python test_scripts/test_openrouter_integration.py
 ```
 
-#### **Llama Models (Open Source)**
+## 📋 Configuration Examples
+
+### Basic Configuration
 
 ```bash
-# Llama 3.1 70B (High Quality)
-export OPENROUTER_MODEL=meta-llama/llama-3.1-70b-instruct
-# Cost: ~$0.59 per 1M input tokens, $0.79 per 1M output tokens
-
-# Llama 3.1 8B (Fast & Cheap)
-export OPENROUTER_MODEL=meta-llama/llama-3.1-8b-instruct
-# Cost: ~$0.06 per 1M input tokens, $0.06 per 1M output tokens
-
-# Llama 3.1 405B (Most Capable Open Model)
-export OPENROUTER_MODEL=meta-llama/llama-3.1-405b-instruct
-# Cost: ~$2.70 per 1M input tokens, $2.70 per 1M output tokens
+# Minimal setup
+export OPENROUTER_API_KEY="sk-or-v1-your-key-here"
+export OPENROUTER_MODEL="anthropic/claude-3.5-sonnet"
 ```
 
-#### **Gemini Models (Google)**
+### Advanced Configuration
 
 ```bash
-# Gemini Flash 1.5 (Fast)
-export OPENROUTER_MODEL=google/gemini-flash-1.5
-# Cost: ~$0.075 per 1M input tokens, $0.30 per 1M output tokens
-
-# Gemini Pro 1.5 (High Quality)
-export OPENROUTER_MODEL=google/gemini-pro-1.5
-# Cost: ~$1.25 per 1M input tokens, $5.00 per 1M output tokens
+# Full setup with rankings and debugging
+export OPENROUTER_API_KEY="sk-or-v1-your-key-here"
+export OPENROUTER_MODEL="anthropic/claude-3.5-sonnet"
+export OR_SITE_URL="https://myknowledgeapp.com"
+export OR_APP_NAME="Personal Knowledge Manager"
+export DEBUG="true"
 ```
 
-#### **Specialized Models**
+## 🔧 Technical Details
+
+### How the Integration Works
+
+1. **Model Priority**: OpenRouter has the highest priority in model selection
+2. **LiteLLM Integration**: Uses LiteLLM's OpenRouter provider with proper prefixing
+3. **Automatic Fallback**: If OpenRouter fails, falls back to other configured models
+4. **Cost Tracking**: All OpenRouter usage is tracked through your OpenRouter dashboard
+
+### Code Changes Made
+
+The `_setup_openrouter_model` method was updated to:
+
+```python
+def _setup_openrouter_model(self):
+    """Setup OpenRouter model (highest priority)"""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return None
+
+    # Get the model name from environment or use default
+    model_name = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
+
+    # Set up OpenRouter-specific environment variables
+    os.environ["OPENROUTER_API_KEY"] = api_key
+
+    # Optional: Set site URL and app name for OpenRouter rankings
+    site_url = os.getenv("OR_SITE_URL", "")
+    app_name = os.getenv("OR_APP_NAME", "Knowledge-Management-System")
+
+    if site_url:
+        os.environ["OR_SITE_URL"] = site_url
+    if app_name:
+        os.environ["OR_APP_NAME"] = app_name
+
+    # For LiteLLM, OpenRouter models must be prefixed with "openrouter/"
+    litellm_model_name = f"openrouter/{model_name}"
+
+    try:
+        # Create the LiteLLM model with proper OpenRouter configuration
+        model = LiteLLMModel(
+            model_id=litellm_model_name,
+            api_key=api_key
+        )
+
+        print(f"🔗 OpenRouter model configured: {litellm_model_name}")
+        return model
+
+    except Exception as e:
+        print(f"❌ Failed to setup OpenRouter model: {e}")
+        return None
+```
+
+## 🎯 Usage Examples
+
+### Direct LiteLLM Usage
+
+If you want to use OpenRouter directly with LiteLLM (outside the knowledge agent):
+
+```python
+import os
+from litellm import completion
+
+# Set up environment
+os.environ["OPENROUTER_API_KEY"] = "your-key-here"
+
+# Make a request
+response = completion(
+    model="openrouter/anthropic/claude-3.5-sonnet",
+    messages=[
+        {"role": "user", "content": "Hello!"}
+    ]
+)
+
+print(response.choices[0].message.content)
+```
+
+### Using OpenAI Client with OpenRouter
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key="your-openrouter-api-key",
+)
+
+completion = client.chat.completions.create(
+    extra_headers={
+        "HTTP-Referer": "https://your-site.com",  # Optional
+        "X-Title": "Your App Name",  # Optional
+    },
+    model="anthropic/claude-3.5-sonnet",
+    messages=[
+        {"role": "user", "content": "Hello!"}
+    ]
+)
+
+print(completion.choices[0].message.content)
+```
+
+### Using Requests with OpenRouter
+
+```python
+import requests
+import json
+
+response = requests.post(
+    url="https://openrouter.ai/api/v1/chat/completions",
+    headers={
+        "Authorization": "Bearer your-openrouter-api-key",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://your-site.com",  # Optional
+        "X-Title": "Your App Name",  # Optional
+    },
+    data=json.dumps({
+        "model": "anthropic/claude-3.5-sonnet",
+        "messages": [
+            {"role": "user", "content": "Hello!"}
+        ]
+    })
+)
+
+print(response.json())
+```
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+1. **"Model not found" errors**
+
+   - Make sure to prefix the model with `openrouter/` when using LiteLLM
+   - Check that the model exists on OpenRouter
+
+2. **Authentication errors**
+
+   - Verify your API key is correct
+   - Check that you have credits in your OpenRouter account
+
+3. **Rate limiting**
+   - OpenRouter has rate limits per model
+   - Consider using cheaper/free models for testing
+
+### Debug Mode
+
+Enable debug mode for detailed error information:
 
 ```bash
-# Web Search Enabled
-export OPENROUTER_MODEL=perplexity/llama-3.1-sonar-large-128k-online
-
-# Reasoning Focused
-export OPENROUTER_MODEL=microsoft/wizardlm-2-8x22b
-
-# Code Generation
-export OPENROUTER_MODEL=deepseek/deepseek-coder
-
-# Long Context (2M tokens)
-export OPENROUTER_MODEL=anthropic/claude-3-haiku:beta
+export DEBUG=true
 ```
 
-## 🎯 Model Selection Guide
+This will show detailed LiteLLM logs and help identify issues.
 
-### **For Different Use Cases**
+### Check Your Setup
 
-#### **General Knowledge Management**
-
-- **Best**: `anthropic/claude-3.5-sonnet` - Excellent reasoning and categorization
-- **Budget**: `anthropic/claude-3-haiku` - Fast and affordable
-- **Alternative**: `openai/gpt-4o-mini` - Good balance of cost and quality
-
-#### **Research Analysis**
-
-- **Best**: `anthropic/claude-3-opus` - Most thorough analysis
-- **Alternative**: `openai/gpt-4o` - Strong analytical capabilities
-- **Budget**: `meta-llama/llama-3.1-70b-instruct` - Open source option
-
-#### **High Volume Processing**
-
-- **Best**: `anthropic/claude-3-haiku` - Fastest response times
-- **Alternative**: `openai/gpt-4o-mini` - Very cost effective
-- **Budget**: `meta-llama/llama-3.1-8b-instruct` - Lowest cost
-
-#### **Complex Reasoning**
-
-- **Best**: `anthropic/claude-3-opus` - Superior reasoning abilities
-- **Alternative**: `openai/gpt-4-turbo` - Strong reasoning
-- **Budget**: `microsoft/wizardlm-2-8x22b` - Specialized for reasoning
-
-## 💡 Usage Examples
-
-### **Basic Chat**
+Run the test script to verify everything:
 
 ```bash
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Analyze this research: Transformers revolutionized NLP"}'
+cd backend
+python test_scripts/test_openrouter_integration.py
 ```
 
-### **Model Switching**
+### Check OpenRouter Dashboard
 
-```bash
-# Switch to GPT-4o for comparison
-export OPENROUTER_MODEL=openai/gpt-4o
-uv run python run.py
+1. Go to [OpenRouter.ai](https://openrouter.ai)
+2. Check your usage and spending
+3. Verify your API key is active
+4. Check rate limits for your models
 
-# Switch back to Claude
-export OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
-uv run python run.py
-```
+## 💡 Tips and Best Practices
 
-### **Performance Testing**
+### Model Selection
 
-```bash
-# Test different models
-export OPENROUTER_MODEL=anthropic/claude-3-haiku
-uv run python test_openrouter_integration.py
+- **For production**: Use reliable models like `anthropic/claude-3.5-sonnet`
+- **For testing**: Use free models like `meta-llama/llama-3.1-8b-instruct:free`
+- **For cost optimization**: Compare pricing on OpenRouter's model page
 
-export OPENROUTER_MODEL=openai/gpt-4o-mini
-uv run python test_openrouter_integration.py
-```
+### Cost Management
 
-## 📊 Cost Monitoring
+- Monitor your usage on the OpenRouter dashboard
+- Set up billing alerts
+- Use cheaper models for simple tasks
+- Consider using free models for development
 
-### **Track Usage**
+### Performance Optimization
 
-1. Visit [OpenRouter Usage](https://openrouter.ai/activity)
-2. View detailed breakdown by model
-3. Set up billing alerts
-4. Monitor cost per request
+- Use appropriate models for your task complexity
+- Set reasonable `max_tokens` limits
+- Cache responses when possible
+- Use OpenRouter's routing features for automatic failover
 
-### **Cost Optimization Tips**
+## 📊 Model Recommendations
 
-1. **Use Haiku for categorization** - Fast and cheap for simple tasks
-2. **Use Sonnet for analysis** - Better quality for complex reasoning
-3. **Batch requests** - Reduce overhead costs
-4. **Cache results** - The system already does this automatically
-5. **Monitor token usage** - Track input/output token ratios
+### For Knowledge Management
 
-## 🔧 Advanced Configuration
+| Task             | Recommended Model             | Why                         |
+| ---------------- | ----------------------------- | --------------------------- |
+| Note creation    | `anthropic/claude-3.5-haiku`  | Fast, good for simple tasks |
+| Content analysis | `anthropic/claude-3.5-sonnet` | Excellent reasoning         |
+| Quick searches   | `openai/gpt-4o-mini`          | Fast and cost-effective     |
+| Complex research | `anthropic/claude-3.5-sonnet` | Best for detailed analysis  |
 
-### **Model Fallbacks**
+### Cost Comparison
 
-```bash
-# Primary model
-export OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
+Check current pricing at [OpenRouter.ai/models](https://openrouter.ai/models)
 
-# The system will automatically fallback to:
-# 1. Anthropic direct API (if ANTHROPIC_API_KEY set)
-# 2. HuggingFace (if HF_TOKEN set)
-# 3. OpenAI direct (if OPENAI_API_KEY set)
-# 4. Free HuggingFace models
-```
+## 🔄 Migration from Other Providers
 
-### **Custom Headers**
+If you're switching from another provider:
 
-OpenRouter supports additional headers for advanced features:
+1. Keep your old API keys as fallbacks
+2. Test thoroughly with OpenRouter first
+3. Monitor costs and performance
+4. Gradually migrate your workflows
 
-- `HTTP-Referer` - For analytics
-- `X-Title` - Custom request titles
-- `X-Description` - Request descriptions
+## 📚 Additional Resources
 
-### **Rate Limiting**
-
-OpenRouter provides built-in rate limiting and queuing:
-
-- No need to implement client-side rate limiting
-- Automatic request queuing during high load
-- Transparent retry handling
-
-## 🧪 Testing Your Setup
-
-### **Run Integration Tests**
-
-```bash
-# Test with your API key
-export OPENROUTER_API_KEY=your_key_here
-uv run python test_openrouter_integration.py
-```
-
-### **Test Different Models**
-
-```bash
-# Test Claude
-export OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
-curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"message": "Hello Claude via OpenRouter"}'
-
-# Test GPT
-export OPENROUTER_MODEL=openai/gpt-4o-mini
-curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"message": "Hello GPT via OpenRouter"}'
-
-# Test Llama
-export OPENROUTER_MODEL=meta-llama/llama-3.1-70b-instruct
-curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"message": "Hello Llama via OpenRouter"}'
-```
-
-## 🔍 Troubleshooting
-
-### **Common Issues**
-
-#### **API Key Issues**
-
-```bash
-# Verify your API key is set
-echo $OPENROUTER_API_KEY
-
-# Test API key validity
-curl -H "Authorization: Bearer $OPENROUTER_API_KEY" https://openrouter.ai/api/v1/models
-```
-
-#### **Model Not Found**
-
-- Check [OpenRouter Models](https://openrouter.ai/models) for available models
-- Verify exact model name spelling
-- Some models may require special access
-
-#### **Rate Limiting**
-
-- OpenRouter handles rate limiting automatically
-- No client-side rate limiting needed
-- Check your account credits and limits
-
-#### **High Costs**
-
-- Monitor usage at [OpenRouter Activity](https://openrouter.ai/activity)
-- Switch to cheaper models for simple tasks
-- Implement request batching if needed
-
-### **Debug Mode**
-
-```bash
-# Enable debug logging
-export OPENROUTER_DEBUG=true
-uv run python run.py
-```
-
-## 📈 Performance Optimization
-
-### **Model Selection Strategy**
-
-1. **Start with Haiku** - Test your prompts with fast, cheap model
-2. **Upgrade to Sonnet** - When you need better quality
-3. **Use Opus sparingly** - Only for most complex tasks
-4. **Compare with GPT** - A/B test different providers
-
-### **Caching Strategy**
-
-The system automatically caches:
-
-- Content processing results (30%+ performance improvement)
-- Note categorizations
-- Knowledge graph relationships
-
-### **Request Optimization**
-
-- Use specific, clear prompts
-- Avoid redundant context
-- Leverage the system's built-in tools
-- Monitor token usage patterns
-
-## 🎯 Best Practices
-
-### **Development**
-
-1. **Start with free tier** - Test integration before committing
-2. **Use environment variables** - Easy model switching
-3. **Monitor costs** - Set up billing alerts
-4. **Test different models** - Find best fit for your use case
-
-### **Production**
-
-1. **Set spending limits** - Prevent unexpected costs
-2. **Implement monitoring** - Track usage patterns
-3. **Use appropriate models** - Match model to task complexity
-4. **Cache aggressively** - Leverage built-in caching system
-
-### **Cost Management**
-
-1. **Use cheaper models for categorization** - Haiku or GPT-4o-mini
-2. **Use premium models for analysis** - Sonnet or GPT-4o
-3. **Monitor token ratios** - Optimize prompt efficiency
-4. **Batch similar requests** - Reduce overhead
-
-## 🔗 Useful Links
-
-- **OpenRouter Website**: [openrouter.ai](https://openrouter.ai)
-- **Model Pricing**: [openrouter.ai/models](https://openrouter.ai/models)
-- **API Documentation**: [openrouter.ai/docs](https://openrouter.ai/docs)
-- **Usage Dashboard**: [openrouter.ai/activity](https://openrouter.ai/activity)
-- **Discord Community**: [OpenRouter Discord](https://discord.gg/openrouter)
+- [OpenRouter Documentation](https://openrouter.ai/docs)
+- [LiteLLM OpenRouter Guide](https://docs.litellm.ai/docs/providers/openrouter)
+- [OpenRouter Model Pricing](https://openrouter.ai/models)
+- [OpenRouter API Reference](https://openrouter.ai/docs/api-reference)
 
 ## 🆘 Support
 
 If you encounter issues:
 
-1. Check this guide first
-2. Run the test script: `uv run python test_openrouter_integration.py`
-3. Check OpenRouter status: [status.openrouter.ai](https://status.openrouter.ai)
-4. Review usage dashboard for account issues
-5. Contact OpenRouter support for API-specific issues
+1. Check the troubleshooting section above
+2. Run the test script with debug mode enabled
+3. Check OpenRouter's status page
+4. Review your OpenRouter dashboard for usage/billing issues
 
 ---
 
-**OpenRouter Integration Complete! 🌟 | Access to 200+ AI Models | Optimized for Knowledge Management 📚**
+_This guide was last updated with the OpenRouter integration fixes. The system now properly supports OpenRouter with LiteLLM integration._

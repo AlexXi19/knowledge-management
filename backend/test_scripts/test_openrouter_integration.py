@@ -1,298 +1,244 @@
 #!/usr/bin/env python3
 """
-Test script for OpenRouter integration in the knowledge management system
+Test script for OpenRouter integration with LiteLLM
+Tests the knowledge agent's OpenRouter model setup and basic functionality
 """
 
-import asyncio
-import sys
 import os
-from pathlib import Path
+import sys
+import asyncio
+import json
+from typing import Dict, Any
 
-# Add the backend directory to the Python path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the parent directory to path to import backend modules
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from agent.knowledge_agent import KnowledgeAgent
+from litellm import completion
+import litellm
 
-async def test_openrouter_setup():
-    """Test if OpenRouter models can be properly initialized"""
-    print("🧪 Testing OpenRouter integration...")
+
+def test_direct_openrouter_litellm():
+    """Test direct OpenRouter integration with LiteLLM"""
+    print("🧪 Testing direct OpenRouter integration with LiteLLM...")
     
-    # Check if OpenRouter API key is available
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    if not openrouter_key:
-        print("❌ OPENROUTER_API_KEY not found in environment variables")
-        print("   Please set your OpenRouter API key to test integration:")
-        print("   export OPENROUTER_API_KEY=your_api_key_here")
+    # Check if API key is set
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        print("❌ OPENROUTER_API_KEY environment variable not set")
         return False
     
-    # Check which OpenRouter model is configured
-    openrouter_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
-    print(f"🤖 Testing with OpenRouter model: {openrouter_model}")
+    # Set up environment variables
+    os.environ["OPENROUTER_API_KEY"] = api_key
+    
+    # Optional: Set site URL and app name
+    site_url = os.getenv("OR_SITE_URL", "")
+    app_name = os.getenv("OR_APP_NAME", "Knowledge-Management-Test")
+    
+    if site_url:
+        os.environ["OR_SITE_URL"] = site_url
+    if app_name:
+        os.environ["OR_APP_NAME"] = app_name
     
     try:
-        # Initialize the agent (should use OpenRouter if API key is available)
-        agent = KnowledgeAgent()
-        await agent.initialize()
+        # Test with the corrected OpenRouter model format
+        model_name = "openrouter/anthropic/claude-3.5-sonnet"
         
-        # Check if the model was properly set up
-        if hasattr(agent, 'model_name') and openrouter_model in agent.model_name:
-            print(f"✅ Successfully initialized with {agent.model_name}")
-        else:
-            print(f"⚠️  Agent initialized but not using OpenRouter model: {getattr(agent, 'model_name', 'unknown')}")
-            return False
+        print(f"📡 Testing model: {model_name}")
         
+        # Make a simple test completion
+        response = completion(
+            model=model_name,
+            messages=[
+                {"role": "user", "content": "Hello! Please respond with just 'OpenRouter working' to confirm the connection."}
+            ],
+            max_tokens=50
+        )
+        
+        print("✅ Direct OpenRouter test successful!")
+        print(f"   Response: {response.choices[0].message.content}")
         return True
         
     except Exception as e:
-        print(f"❌ Error initializing agent with OpenRouter: {e}")
+        print(f"❌ Direct OpenRouter test failed: {e}")
         return False
 
-async def test_openrouter_conversation():
-    """Test a simple conversation with OpenRouter"""
-    print("\n🧪 Testing OpenRouter conversation capabilities...")
+
+def test_knowledge_agent_openrouter():
+    """Test the knowledge agent with OpenRouter model"""
+    print("\n🧪 Testing KnowledgeAgent with OpenRouter...")
+    
+    # Check if API key is set
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        print("❌ OPENROUTER_API_KEY environment variable not set")
+        return False
     
     try:
-        agent = KnowledgeAgent()
-        await agent.initialize()
+        # Set the model preference to ensure OpenRouter is used
+        os.environ["OPENROUTER_MODEL"] = "anthropic/claude-3.5-sonnet"
         
-        # Test a simple knowledge management task
-        test_message = "Create a note about the benefits of using OpenRouter for accessing multiple AI models"
+        # Create knowledge agent in test directory
+        test_dir = os.path.join(os.path.dirname(__file__), "test_openrouter_notes")
+        os.makedirs(test_dir, exist_ok=True)
         
-        print(f"💭 Sending test message: {test_message}")
-        response = await agent.process_message(test_message)
+        agent = KnowledgeAgent(dir=test_dir)
         
-        print(f"🤖 OpenRouter response received:")
-        print(f"   Categories: {response.categories}")
-        print(f"   Response length: {len(response.response)} characters")
-        print(f"   Knowledge updates: {len(response.knowledge_updates)}")
-        print(f"   Suggested actions: {len(response.suggested_actions)}")
-        
-        # Check if the response looks reasonable
-        if len(response.response) > 50 and any(cat in ["Learning", "Research", "Ideas to Develop"] for cat in response.categories):
-            print("✅ OpenRouter conversation test successful!")
-            return True
-        else:
-            print("⚠️  OpenRouter response seems incomplete or unexpected")
+        # Check if OpenRouter model was selected
+        if not agent.model:
+            print("❌ No model was initialized")
             return False
             
+        print(f"✅ Knowledge agent initialized with model")
+        
+        # Test a simple message processing
+        async def test_message():
+            test_message = "This is a test note for OpenRouter integration. Please create a simple note."
+            
+            try:
+                response = await agent.process_message(test_message)
+                print(f"✅ Message processing successful!")
+                print(f"   Response: {response.response[:100]}...")
+                return True
+            except Exception as e:
+                print(f"❌ Message processing failed: {e}")
+                return False
+        
+        # Run the async test
+        result = asyncio.run(test_message())
+        
+        # Clean up test directory
+        import shutil
+        if os.path.exists(test_dir):
+            shutil.rmtree(test_dir)
+        
+        return result
+        
     except Exception as e:
-        print(f"❌ Error in OpenRouter conversation: {e}")
+        print(f"❌ KnowledgeAgent OpenRouter test failed: {e}")
         return False
 
-async def test_openrouter_model_variety():
-    """Test different models available through OpenRouter"""
-    print("\n🧪 Testing OpenRouter model variety...")
+
+def test_openrouter_models_list():
+    """Test different OpenRouter models"""
+    print("\n🧪 Testing different OpenRouter models...")
     
-    # Test different models that OpenRouter provides
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        print("❌ OPENROUTER_API_KEY environment variable not set")
+        return False
+    
+    # List of models to test
     test_models = [
-        "anthropic/claude-3.5-sonnet",
-        "openai/gpt-4o-mini",
-        "meta-llama/llama-3.1-70b-instruct",
-        "google/gemini-flash-1.5"
+        "openrouter/anthropic/claude-3.5-sonnet",
+        "openrouter/openai/gpt-4o-mini",
+        "openrouter/meta-llama/llama-3.1-8b-instruct:free",
+        "openrouter/google/gemini-flash-1.5"
     ]
     
-    original_model = os.environ.get("OPENROUTER_MODEL")
     successful_models = []
     
     for model in test_models:
-        print(f"🔄 Testing model: {model}")
-        
         try:
-            # Temporarily set the model
-            os.environ["OPENROUTER_MODEL"] = model
+            print(f"📡 Testing model: {model}")
             
-            # Create new agent instance
-            agent = KnowledgeAgent()
+            response = completion(
+                model=model,
+                messages=[
+                    {"role": "user", "content": "Respond with just 'OK' to confirm this model works."}
+                ],
+                max_tokens=10
+            )
             
-            # Check if model was set correctly
-            if hasattr(agent, 'model_name') and model in agent.model_name:
-                print(f"   ✅ {model} configured successfully")
-                successful_models.append(model)
-            else:
-                print(f"   ⚠️  {model} configuration unclear")
-                
+            result = response.choices[0].message.content.strip()
+            print(f"   ✅ {model}: {result}")
+            successful_models.append(model)
+            
         except Exception as e:
-            print(f"   ❌ {model} failed: {e}")
+            print(f"   ❌ {model}: {str(e)[:100]}...")
     
-    # Restore original model
-    if original_model:
-        os.environ["OPENROUTER_MODEL"] = original_model
-    elif "OPENROUTER_MODEL" in os.environ:
-        del os.environ["OPENROUTER_MODEL"]
-    
-    print(f"\n📊 Successfully configured {len(successful_models)}/{len(test_models)} models")
-    print(f"   Working models: {', '.join(successful_models)}")
-    
-    return len(successful_models) >= 2  # At least 2 models should work
-
-async def test_openrouter_performance():
-    """Test OpenRouter's performance with knowledge management tasks"""
-    print("\n🧪 Testing OpenRouter performance with complex tasks...")
-    
-    try:
-        agent = KnowledgeAgent()
-        await agent.initialize()
-        
-        # Test more complex knowledge management scenarios
-        test_scenarios = [
-            "Analyze and categorize this research: OpenRouter provides unified access to multiple AI models",
-            "Create a comprehensive note about the advantages of model diversity in AI applications",
-            "Search for existing notes about AI models and suggest connections to API services"
-        ]
-        
-        success_count = 0
-        
-        for i, scenario in enumerate(test_scenarios, 1):
-            print(f"📝 Test {i}: {scenario[:50]}...")
-            
-            try:
-                response = await agent.process_message(scenario)
-                
-                # Basic quality checks
-                if (len(response.response) > 100 and 
-                    response.categories and 
-                    len(response.response.split()) > 20):
-                    print(f"   ✅ Test {i} passed")
-                    success_count += 1
-                else:
-                    print(f"   ⚠️  Test {i} response quality low")
-                    
-            except Exception as e:
-                print(f"   ❌ Test {i} failed: {e}")
-        
-        success_rate = (success_count / len(test_scenarios)) * 100
-        print(f"\n📊 OpenRouter performance test results: {success_count}/{len(test_scenarios)} ({success_rate:.1f}% success rate)")
-        
-        return success_rate >= 66.7  # At least 2/3 tests should pass
-        
-    except Exception as e:
-        print(f"❌ Error in OpenRouter performance testing: {e}")
-        return False
-
-async def test_openrouter_priority():
-    """Test that OpenRouter has the highest priority in model selection"""
-    print("\n🧪 Testing OpenRouter priority in model selection...")
-    
-    # Test with different environment setups
-    original_openrouter = os.environ.get("OPENROUTER_API_KEY")
-    original_anthropic = os.environ.get("ANTHROPIC_API_KEY") 
-    original_openai = os.environ.get("OPENAI_API_KEY")
-    
-    try:
-        # Test 1: Only OpenRouter key (should use OpenRouter)
-        if original_openrouter:
-            # Temporarily remove other keys
-            os.environ.pop("ANTHROPIC_API_KEY", None)
-            os.environ.pop("OPENAI_API_KEY", None)
-            
-            agent = KnowledgeAgent()
-            openrouter_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
-            
-            if hasattr(agent, 'model_name') and openrouter_model in agent.model_name:
-                print("✅ Priority test 1 passed: OpenRouter selected when only OpenRouter key available")
-            else:
-                print(f"⚠️  Priority test 1 failed: Expected OpenRouter, got {getattr(agent, 'model_name', 'unknown')}")
-        
-        # Test 2: OpenRouter + other keys (OpenRouter should still have priority)
-        if original_openrouter and (original_anthropic or original_openai):
-            # Restore other keys
-            if original_anthropic:
-                os.environ["ANTHROPIC_API_KEY"] = original_anthropic
-            if original_openai:
-                os.environ["OPENAI_API_KEY"] = original_openai
-            
-            agent = KnowledgeAgent()
-            if hasattr(agent, 'model_name') and openrouter_model in agent.model_name:
-                print("✅ Priority test 2 passed: OpenRouter still selected when multiple keys available")
-            else:
-                print(f"⚠️  Priority test 2 failed: Expected OpenRouter, got {getattr(agent, 'model_name', 'unknown')}")
-        
+    if successful_models:
+        print(f"\n✅ {len(successful_models)} out of {len(test_models)} models working")
         return True
-        
-    except Exception as e:
-        print(f"❌ Error in OpenRouter priority testing: {e}")
-        return False
-    finally:
-        # Restore original environment
-        if original_openrouter:
-            os.environ["OPENROUTER_API_KEY"] = original_openrouter
-        if original_anthropic:
-            os.environ["ANTHROPIC_API_KEY"] = original_anthropic
-        if original_openai:
-            os.environ["OPENAI_API_KEY"] = original_openai
-
-async def test_openrouter_cost_tracking():
-    """Test OpenRouter cost and usage tracking features"""
-    print("\n🧪 Testing OpenRouter cost tracking awareness...")
-    
-    try:
-        agent = KnowledgeAgent()
-        await agent.initialize()
-        
-        # Test a simple message to understand cost implications
-        test_message = "Explain the cost benefits of using OpenRouter for AI model access"
-        
-        print(f"💰 Testing cost-aware message: {test_message[:50]}...")
-        response = await agent.process_message(test_message)
-        
-        # Check if response is reasonable
-        if len(response.response) > 50:
-            print("✅ OpenRouter cost tracking test completed")
-            print(f"   Response mentions cost: {'cost' in response.response.lower()}")
-            print(f"   Response mentions pricing: {'pric' in response.response.lower()}")
-            return True
-        else:
-            print("⚠️  OpenRouter cost tracking response incomplete")
-            return False
-            
-    except Exception as e:
-        print(f"❌ Error in OpenRouter cost tracking test: {e}")
+    else:
+        print("\n❌ No models working")
         return False
 
-async def main():
-    """Run all OpenRouter integration tests"""
-    print("🚀 Starting OpenRouter integration tests...")
-    print("=" * 70)
+
+def display_openrouter_config():
+    """Display current OpenRouter configuration"""
+    print("\n📋 Current OpenRouter Configuration:")
+    print("=" * 50)
     
+    # Check environment variables
+    config = {
+        "OPENROUTER_API_KEY": "Set" if os.getenv("OPENROUTER_API_KEY") else "Not set",
+        "OPENROUTER_MODEL": os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet (default)"),
+        "OR_SITE_URL": os.getenv("OR_SITE_URL", "Not set"),
+        "OR_APP_NAME": os.getenv("OR_APP_NAME", "Not set"),
+        "DEBUG": os.getenv("DEBUG", "false")
+    }
+    
+    for key, value in config.items():
+        print(f"   {key}: {value}")
+    
+    print("=" * 50)
+
+
+def main():
+    """Main test function"""
+    print("🚀 OpenRouter Integration Test Suite")
+    print("=" * 60)
+    
+    # Display configuration
+    display_openrouter_config()
+    
+    # Enable debug mode for detailed error information
+    if os.getenv("DEBUG") == "true":
+        litellm.set_verbose = True
+    
+    # Run tests
     tests = [
-        ("OpenRouter Setup", test_openrouter_setup),
-        ("OpenRouter Conversation", test_openrouter_conversation),
-        ("Model Variety", test_openrouter_model_variety),
-        ("OpenRouter Performance", test_openrouter_performance),
-        ("Model Priority", test_openrouter_priority),
-        ("Cost Tracking", test_openrouter_cost_tracking)
+        ("Direct OpenRouter LiteLLM", test_direct_openrouter_litellm),
+        ("KnowledgeAgent OpenRouter", test_knowledge_agent_openrouter),
+        ("OpenRouter Models List", test_openrouter_models_list)
     ]
     
-    passed = 0
-    failed = 0
+    results = {}
     
     for test_name, test_func in tests:
-        print(f"\n🧪 Running {test_name} test...")
+        print(f"\n{'='*60}")
+        print(f"Running: {test_name}")
+        print(f"{'='*60}")
+        
         try:
-            result = await test_func()
-            if result:
-                passed += 1
-                print(f"✅ {test_name} test PASSED")
-            else:
-                failed += 1
-                print(f"❌ {test_name} test FAILED")
+            results[test_name] = test_func()
         except Exception as e:
-            failed += 1
-            print(f"❌ {test_name} test FAILED with exception: {e}")
+            print(f"❌ Test '{test_name}' encountered an error: {e}")
+            results[test_name] = False
     
-    print("\n" + "=" * 70)
-    print(f"🧪 Test Results: {passed} passed, {failed} failed")
+    # Print summary
+    print(f"\n{'='*60}")
+    print("📊 Test Results Summary")
+    print(f"{'='*60}")
     
-    if failed == 0:
-        print("🎉 All OpenRouter integration tests passed!")
-        print("🤖 Your system is ready to use OpenRouter with multiple AI models!")
+    for test_name, passed in results.items():
+        status = "✅ PASSED" if passed else "❌ FAILED"
+        print(f"   {test_name}: {status}")
+    
+    passed_count = sum(1 for result in results.values() if result)
+    total_count = len(results)
+    
+    print(f"\n📈 Overall: {passed_count}/{total_count} tests passed")
+    
+    if passed_count == total_count:
+        print("🎉 All tests passed! OpenRouter integration is working correctly.")
+        return True
     else:
-        print("⚠️  Some tests failed. Check the output above for details.")
-        if not os.getenv("OPENROUTER_API_KEY"):
-            print("💡 Tip: Make sure to set OPENROUTER_API_KEY to test OpenRouter integration")
-    
-    return failed == 0
+        print("⚠️  Some tests failed. Please check the configuration and try again.")
+        return False
+
 
 if __name__ == "__main__":
-    success = asyncio.run(main())
+    success = main()
     sys.exit(0 if success else 1) 

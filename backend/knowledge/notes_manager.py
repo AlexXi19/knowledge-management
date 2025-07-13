@@ -50,6 +50,19 @@ class Note:
     def update_content_hash(self):
         """Update the content hash based on current content"""
         self.content_hash = calculate_content_hash(self.content)
+        
+    def get_obsidian_wiki_link(self, notes_directory: Path) -> str:
+        """Get the proper Obsidian wiki-link path for this note"""
+        try:
+            # Get relative path from notes directory to this note (without .md extension)
+            note_path = Path(self.path)
+            relative_path = note_path.relative_to(notes_directory)
+            # Remove .md extension for wiki-link
+            wiki_path = str(relative_path).replace('.md', '')
+            return f"[[{wiki_path}]]"
+        except Exception:
+            # Fallback to title if path calculation fails
+            return f"[[{self.title}]]"
 
 class NotesManager:
     """Manages note files and directory structure with hash-based caching"""
@@ -65,9 +78,81 @@ class NotesManager:
             "Reading List": "reading-list",
             "Projects": "projects",
             "Learning": "learning",
-            "Quick Notes": "quick-notes"
+            "Quick Notes": "quick-notes",
+            "Web Content": "web-content"  # Add web content category
         }
         self.initialized = False
+    
+    def get_obsidian_wiki_link_for_note(self, note_title: str, note_category: str = None) -> str:
+        """
+        Generate the proper Obsidian wiki-link path for a note title and category.
+        This ensures Obsidian can resolve the link correctly.
+        
+        Args:
+            note_title: The title of the note
+            note_category: The category/folder the note is in
+            
+        Returns:
+            Properly formatted wiki-link with path, e.g., [[ideas/My Note]]
+        """
+        try:
+            # Find the note in our index first
+            for note in self.notes_index.values():
+                if note.title == note_title:
+                    return note.get_obsidian_wiki_link(self.notes_directory)
+            
+            # If not found in index, generate based on category
+            if note_category and note_category in self.categories:
+                folder_name = self.categories[note_category]
+                # Sanitize title for filename
+                safe_title = re.sub(r'[^\w\s-]', '', note_title).strip()
+                safe_title = re.sub(r'[-\s]+', '-', safe_title)
+                return f"[[{folder_name}/{safe_title}]]"
+            
+            # Fallback to bare title
+            return f"[[{note_title}]]"
+            
+        except Exception as e:
+            print(f"Error generating wiki-link for {note_title}: {e}")
+            return f"[[{note_title}]]"
+    
+    def _fix_wiki_links_in_content(self, content: str) -> str:
+        """
+        Fix bare wiki-links in content to use proper paths for Obsidian compatibility.
+        Converts [[Note Title]] to [[category/note-title]] where appropriate.
+        """
+        import re
+        
+        def replace_wiki_link(match):
+            link_content = match.group(1).strip()
+            
+            # Skip if already has a path (contains '/')
+            if '/' in link_content:
+                return match.group(0)
+            
+            # Skip if it's a display link with |
+            if '|' in link_content:
+                target, display = link_content.split('|', 1)
+                target = target.strip()
+                display = display.strip()
+                
+                # Try to resolve the target
+                proper_link = self.get_obsidian_wiki_link_for_note(target)
+                if proper_link != f"[[{target}]]":
+                    # Extract path from proper link
+                    path_match = re.match(r'\[\[([^\]]+)\]\]', proper_link)
+                    if path_match:
+                        return f"[[{path_match.group(1)}|{display}]]"
+                
+                return match.group(0)
+            
+            # Try to resolve bare link
+            proper_link = self.get_obsidian_wiki_link_for_note(link_content)
+            return proper_link
+        
+        # Pattern to match wiki-links
+        wiki_link_pattern = r'\[\[([^\]]+)\]\]'
+        return re.sub(wiki_link_pattern, replace_wiki_link, content)
     
     async def initialize(self):
         """Initialize the notes manager with hash tracking"""
@@ -316,6 +401,9 @@ This folder contains notes categorized as "{category}".
         # Create note content with frontmatter
         note_content = f"---\n{yaml.dump(frontmatter, default_flow_style=False)}---\n\n# {title}\n\n{content}"
         
+        # Fix wiki-links in content
+        note_content = self._fix_wiki_links_in_content(note_content)
+        
         # Write file
         async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
             await f.write(note_content)
@@ -381,6 +469,9 @@ This folder contains notes categorized as "{category}".
                     updated_content = f"---\n{yaml.dump(metadata, default_flow_style=False)}---\n\n{parts[2].strip()}{new_content_section}"
                 except:
                     pass
+        
+        # Fix wiki-links in content
+        updated_content = self._fix_wiki_links_in_content(updated_content)
         
         # Write updated content
         async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:

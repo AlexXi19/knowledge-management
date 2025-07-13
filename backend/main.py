@@ -1,10 +1,12 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import json
 import asyncio
+import uuid
+from datetime import datetime
 from dotenv import load_dotenv
 import os
 
@@ -27,6 +29,18 @@ app.add_middleware(
 
 # Initialize the knowledge agent with smolagents
 knowledge_agent = KnowledgeAgent()
+
+# Task management for non-blocking operations
+active_tasks: Dict[str, Dict[str, Any]] = {}
+
+class TaskStatus(BaseModel):
+    """Task status model"""
+    task_id: str
+    status: str  # "pending", "running", "completed", "failed"
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: str
+    completed_at: Optional[str] = None
 
 @app.on_event("startup")
 async def startup_event():
@@ -92,36 +106,180 @@ async def get_notes_config():
 async def chat(request: ChatRequest):
     """
     Main chat endpoint that processes user messages and returns agent responses
+    Uses asyncio for non-blocking processing (Node.js-style promises)
     """
     try:
-        # Process the message through the smolagents knowledge agent
-        response = await knowledge_agent.process_message(
+        # Process the message using asyncio - non-blocking like Node.js promises
+        result = await knowledge_agent.process_message(
             message=request.message,
             conversation_history=request.conversation_history
         )
         
-        return response
+        return result
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat/async")
+async def chat_async(request: ChatRequest, background_tasks: BackgroundTasks):
+    """
+    Async chat endpoint that starts processing in background and returns task ID
+    Uses asyncio for concurrent processing without blocking
+    """
+    try:
+        # Generate unique task ID
+        task_id = str(uuid.uuid4())
+        
+        # Initialize task status
+        active_tasks[task_id] = {
+            "task_id": task_id,
+            "status": "pending",
+            "result": None,
+            "error": None,
+            "created_at": datetime.now().isoformat(),
+            "completed_at": None
+        }
+        
+        # Start background task using asyncio (like Node.js async/await)
+        background_tasks.add_task(
+            process_chat_task,
+            task_id,
+            request.message,
+            request.conversation_history
+        )
+        
+        return {
+            "task_id": task_id,
+            "status": "pending",
+            "message": "Processing started in background"
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/chat/task/{task_id}")
+async def get_task_status(task_id: str):
+    """
+    Get the status of a background chat task
+    """
+    if task_id not in active_tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task_info = active_tasks[task_id]
+    
+    # Clean up completed tasks older than 10 minutes
+    if task_info["status"] in ["completed", "failed"] and task_info["completed_at"]:
+        completed_time = datetime.fromisoformat(task_info["completed_at"])
+        if (datetime.now() - completed_time).total_seconds() > 600:  # 10 minutes
+            del active_tasks[task_id]
+            raise HTTPException(status_code=410, detail="Task expired")
+    
+    return TaskStatus(**task_info)
+
+async def process_chat_task(task_id: str, message: str, conversation_history: List[ChatMessage] = None):
+    """
+    Background task to process chat messages
+    """
+    try:
+        # Update task status
+        active_tasks[task_id]["status"] = "running"
+        
+        # Process the message
+        result = await knowledge_agent.process_message(
+            message=message,
+            conversation_history=conversation_history
+        )
+        
+        # Update task with result
+        active_tasks[task_id].update({
+            "status": "completed",
+            "result": result.model_dump(),
+            "completed_at": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        # Update task with error
+        active_tasks[task_id].update({
+            "status": "failed",
+            "error": str(e),
+            "completed_at": datetime.now().isoformat()
+        })
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     """
     Streaming chat endpoint for real-time responses
+    Uses asyncio generators for streaming (like Node.js readable streams)
     """
     try:
         async def generate():
-            async for chunk in knowledge_agent.stream_response(
-                message=request.message,
-                conversation_history=request.conversation_history
-            ):
-                yield f"data: {json.dumps(chunk)}\n\n"
+            try:
+                # Use asyncio generator for streaming - like Node.js streams
+                async for chunk in knowledge_agent.stream_response(
+                    message=request.message,
+                    conversation_history=request.conversation_history
+                ):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    
+                # Send completion marker
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                
+            except Exception as e:
+                # Send error in stream
+                error_chunk = {
+                    "type": "error",
+                    "message": str(e),
+                    "timestamp": datetime.now().isoformat()
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
         
-        return StreamingResponse(generate(), media_type="text/plain")
+        return StreamingResponse(
+            generate(), 
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            }
+        )
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tasks")
+async def list_active_tasks():
+    """
+    List all active tasks
+    """
+    return {
+        "active_tasks": len(active_tasks),
+        "tasks": [
+            {
+                "task_id": task_id,
+                "status": task_info["status"],
+                "created_at": task_info["created_at"]
+            }
+            for task_id, task_info in active_tasks.items()
+        ]
+    }
+
+@app.delete("/tasks/{task_id}")
+async def cancel_task(task_id: str):
+    """
+    Cancel a running task
+    """
+    if task_id not in active_tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task_info = active_tasks[task_id]
+    if task_info["status"] == "running":
+        task_info["status"] = "cancelled"
+        task_info["completed_at"] = datetime.now().isoformat()
+        return {"message": "Task cancelled"}
+    else:
+        return {"message": f"Task is {task_info['status']}, cannot cancel"}
 
 @app.get("/knowledge/graph")
 async def get_knowledge_graph():
@@ -165,6 +323,17 @@ async def search_knowledge(query: str, limit: int = 10):
     try:
         results = await knowledge_agent.search_knowledge(query, limit)
         return {"results": [result.model_dump() if hasattr(result, 'model_dump') else result for result in results]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/knowledge/search/content")
+async def search_content_in_files(query: str, case_sensitive: bool = False, limit: int = 10):
+    """
+    Search for content in actual note files using grep-like functionality
+    """
+    try:
+        results = await knowledge_agent.search_content_in_files(query, case_sensitive, limit)
+        return {"results": results, "query": query, "case_sensitive": case_sensitive}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -269,11 +438,15 @@ async def get_agent_info():
     Get information about the current agent
     """
     try:
+        tools_count = 0
+        if knowledge_agent.knowledge_worker and hasattr(knowledge_agent.knowledge_worker, 'tools'):
+            tools_count = len(knowledge_agent.knowledge_worker.tools)
+        
         return {
             "agent_type": "smolagents_powered",
             "model": knowledge_agent.model_name,
             "initialized": knowledge_agent.initialized,
-            "tools_count": len(knowledge_agent.agent.tools) if knowledge_agent.agent else 0,
+            "tools_count": tools_count,
             "version": "2.0.0",
             "capabilities": [
                 "Content processing and categorization",
@@ -282,8 +455,23 @@ async def get_agent_info():
                 "Semantic search",
                 "Related content discovery",
                 "Real-time chat streaming",
-                "Multi-step reasoning"
-            ]
+                "Enhanced PKM features",
+                "Wiki-link management",
+                "Typed relationships",
+                "Hierarchical organization"
+            ],
+            "agents": {
+                "knowledge_worker": {
+                    "name": knowledge_agent.knowledge_worker.name if knowledge_agent.knowledge_worker else None,
+                    "max_steps": knowledge_agent.knowledge_worker.max_steps if knowledge_agent.knowledge_worker else None,
+                    "tools": tools_count
+                },
+                "manager_agent": {
+                    "name": knowledge_agent.manager_agent.name if knowledge_agent.manager_agent else None,
+                    "max_steps": knowledge_agent.manager_agent.max_steps if knowledge_agent.manager_agent else None,
+                    "type": "CodeAgent"
+                }
+            }
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -294,19 +482,42 @@ async def get_cache_stats():
     Get hash cache statistics and performance metrics
     """
     try:
-        # Use the agent to get cache stats
-        prompt = "Get cache statistics using the get_cache_stats tool"
-        result = knowledge_agent.agent.run(prompt)
+        # Initialize the knowledge agent if not already done
+        if not knowledge_agent.initialized:
+            await knowledge_agent.initialize()
         
-        try:
-            # Try to parse the JSON result
-            import json
-            stats = json.loads(result)
-            return stats
-        except:
-            # If parsing fails, return the raw result
-            return {"raw_result": result}
+        # Get hash tracker directly
+        hash_tracker = knowledge_agent.enhanced_graph.hash_tracker
+        cache_stats = hash_tracker.get_cache_stats()
+        
+        # Get additional statistics
+        notes_count = len(knowledge_agent.enhanced_graph.nodes_by_id)
+        
+        # Calculate metrics
+        total_cached = cache_stats.get('total_cached_items', 0)
+        total_mapped = cache_stats.get('total_mapped_notes', 0)
+        
+        stats = {
+            "cache_statistics": cache_stats,
+            "notes_count": notes_count,
+            "memory_efficiency": {
+                "cached_items_vs_notes_ratio": round(total_cached / max(notes_count, 1), 2),
+                "mapping_coverage_percent": round(total_mapped / max(notes_count, 1) * 100, 2)
+            },
+            "recommendations": []
+        }
+        
+        # Add recommendations based on stats
+        if total_mapped < notes_count * 0.8:
+            stats["recommendations"].append("Consider rebuilding cache - some notes may not be mapped to knowledge nodes")
+        
+        if total_cached > notes_count * 2:
+            stats["recommendations"].append("Cache cleanup may be beneficial - many stale entries detected")
+            
+        return stats
+        
     except Exception as e:
+        print(f"Error getting cache stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/cache/clear")
@@ -315,17 +526,34 @@ async def clear_cache(confirm: bool = False):
     Clear the hash cache (use with caution)
     """
     try:
-        confirm_str = "yes" if confirm else "no"
-        prompt = f"Clear the cache with confirm='{confirm_str}' using the clear_cache tool"
-        result = knowledge_agent.agent.run(prompt)
+        if not confirm:
+            return {
+                "success": False,
+                "message": "Cache not cleared. Use confirm=true to actually clear the cache.",
+                "warning": "This will remove all cached content hashes and note mappings, requiring full reprocessing on next startup."
+            }
         
-        try:
-            import json
-            response = json.loads(result)
-            return response
-        except:
-            return {"raw_result": result}
+        # Initialize the knowledge agent if not already done
+        if not knowledge_agent.initialized:
+            await knowledge_agent.initialize()
+        
+        # Get hash tracker directly
+        hash_tracker = knowledge_agent.enhanced_graph.hash_tracker
+        old_stats = hash_tracker.get_cache_stats()
+        
+        # Clear the cache
+        hash_tracker.clear_cache()
+        
+        return {
+            "success": True,
+            "message": "Cache cleared successfully",
+            "cleared_items": old_stats['total_cached_items'],
+            "cleared_mappings": old_stats['total_mapped_notes'],
+            "warning": "All cached data has been removed. Next startup will require full reprocessing."
+        }
+        
     except Exception as e:
+        print(f"Error clearing cache: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/cache/rebuild")
@@ -334,16 +562,42 @@ async def rebuild_cache():
     Rebuild the hash cache by reprocessing all content
     """
     try:
-        prompt = "Rebuild the cache using the rebuild_cache tool"
-        result = knowledge_agent.agent.run(prompt)
+        # Initialize the knowledge agent if not already done
+        if not knowledge_agent.initialized:
+            await knowledge_agent.initialize()
         
-        try:
-            import json
-            response = json.loads(result)
-            return response
-        except:
-            return {"raw_result": result}
+        from knowledge.hash_utils import get_hash_tracker
+        
+        hash_tracker = get_hash_tracker()
+        
+        print("🔄 Starting cache rebuild...")
+        
+        # Clear existing cache
+        old_stats = hash_tracker.get_cache_stats()
+        hash_tracker.clear_cache()
+        
+        # Reinitialize enhanced graph to rebuild cache
+        await knowledge_agent.enhanced_graph.initialize()
+        
+        # Get new stats
+        new_stats = hash_tracker.get_cache_stats()
+        
+        return {
+            "success": True,
+            "message": "Cache rebuilt successfully",
+            "before": {
+                "cached_items": old_stats['total_cached_items'],
+                "mapped_notes": old_stats['total_mapped_notes']
+            },
+            "after": {
+                "cached_items": new_stats['total_cached_items'],
+                "mapped_notes": new_stats['total_mapped_notes']
+            },
+            "nodes_processed": len(knowledge_agent.enhanced_graph.nodes_by_id)
+        }
+        
     except Exception as e:
+        print(f"Error rebuilding cache: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/sync")
