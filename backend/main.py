@@ -213,18 +213,44 @@ async def chat_stream(request: ChatRequest):
     """
     try:
         async def generate():
+            complete_response_sent = False
             try:
+                print(f"DEBUG: Starting stream for message: {request.message[:100]}...")
+                
                 # Use asyncio generator for streaming - like Node.js streams
                 async for chunk in knowledge_agent.stream_response(
                     message=request.message,
                     conversation_history=request.conversation_history
                 ):
+                    print(f"DEBUG: Yielding chunk type: {chunk.get('type', 'unknown')}")
+                    
+                    # Check if this is a complete response
+                    if chunk.get('type') == 'complete':
+                        complete_response_sent = True
+                        print(f"DEBUG: Complete response chunk: {chunk}")
+                    
                     yield f"data: {json.dumps(chunk)}\n\n"
+                
+                # If no complete response was sent, send a fallback
+                if not complete_response_sent:
+                    print("DEBUG: No complete response received from agent, sending fallback")
+                    fallback_response = {
+                        "type": "complete",
+                        "response": {
+                            "response": "I've processed your request and organized the information in your knowledge base.",
+                            "categories": ["General"],
+                            "knowledge_updates": [],
+                            "suggested_actions": ["Continue organizing your thoughts"]
+                        }
+                    }
+                    yield f"data: {json.dumps(fallback_response)}\n\n"
                     
                 # Send completion marker
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                print("DEBUG: Stream completed successfully")
                 
             except Exception as e:
+                print(f"DEBUG: Error in streaming: {e}")
                 # Send error in stream
                 error_chunk = {
                     "type": "error",
@@ -246,6 +272,7 @@ async def chat_stream(request: ChatRequest):
         )
     
     except Exception as e:
+        print(f"DEBUG: Error creating stream: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tasks")

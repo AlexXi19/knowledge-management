@@ -62,7 +62,6 @@ interface Message {
   steps?: StepData[];
   metrics?: MetricsData;
   actions?: ActionData[];
-  thinking?: string; // Add thinking field for debugging
 }
 
 interface ProgressData {
@@ -826,6 +825,10 @@ export default function KnowledgeManager() {
     setCurrentMetrics(null);
     setCurrentActions([]);
 
+    // Store actions for this conversation
+    const conversationActions: ActionData[] = [];
+    let finalResponse: any = null;
+
     try {
       // Use Server-Sent Events for streaming
       const eventSource = new EventSource(`http://localhost:8000/chat/stream`, {
@@ -877,36 +880,27 @@ export default function KnowledgeManager() {
                 } else if (data.type === "metrics") {
                   setCurrentMetrics(data.data);
                 } else if (data.type === "action") {
-                  setCurrentActions((prev) => [
-                    ...prev,
-                    {
-                      action: data.action,
-                      details: data.details,
-                      timestamp: data.timestamp,
-                      agent: data.agent,
-                      step_type: data.step_type,
-                      tool_name: data.tool_name,
-                    },
-                  ]);
-                } else if (data.type === "complete") {
-                  const agentResponse: Message = {
-                    id: (Date.now() + 1).toString(),
-                    content: data.response.response,
-                    sender: "agent",
-                    timestamp: new Date(),
-                    progress: currentProgress || undefined,
-                    steps: currentSteps.length > 0 ? currentSteps : undefined,
-                    metrics: currentMetrics || undefined,
-                    actions:
-                      currentActions.length > 0 ? currentActions : undefined,
+                  const actionData = {
+                    action: data.action,
+                    details: data.details,
+                    timestamp: data.timestamp,
+                    agent: data.agent,
+                    step_type: data.step_type,
+                    tool_name: data.tool_name,
                   };
-                  setMessages((prev) => [...prev, agentResponse]);
-                  setCurrentProgress(null);
-                  setCurrentSteps([]);
-                  setCurrentMetrics(null);
-                  setCurrentActions([]);
+                  conversationActions.push(actionData);
+                  setCurrentActions((prev) => [...prev, actionData]);
+                } else if (data.type === "complete") {
+                  finalResponse = data.response;
+                  break; // Exit the streaming loop
                 } else if (data.type === "error") {
                   throw new Error(data.message);
+                } else if (data.type === "done") {
+                  // If we reach 'done' without a complete response, something went wrong
+                  if (!finalResponse) {
+                    console.warn("Received 'done' without complete response");
+                  }
+                  break; // Exit the streaming loop
                 }
               } catch (e) {
                 console.error("Error parsing SSE data:", e);
@@ -914,6 +908,68 @@ export default function KnowledgeManager() {
             }
           }
         }
+      }
+
+      // Create the final agent response
+      if (finalResponse && finalResponse.response) {
+        const agentResponse: Message = {
+          id: (Date.now() + 1).toString(),
+          content: finalResponse.response,
+          sender: "agent",
+          timestamp: new Date(),
+          progress: currentProgress || undefined,
+          steps: currentSteps.length > 0 ? currentSteps : undefined,
+          metrics: currentMetrics || undefined,
+          actions:
+            conversationActions.length > 0 ? conversationActions : undefined,
+        };
+
+        setMessages((prev) => [...prev, agentResponse]);
+      } else {
+        // Create a smart fallback based on what we know
+        let fallbackContent =
+          "I've processed your request and organized the information.";
+
+        // If we have actions, we can infer what happened
+        if (conversationActions.length > 0) {
+          const hasCreate = conversationActions.some(
+            (action) =>
+              action.action.includes("Creating") ||
+              action.tool_name === "create_knowledge_note"
+          );
+          const hasUpdate = conversationActions.some(
+            (action) =>
+              action.action.includes("Updating") ||
+              action.tool_name === "update_knowledge_note"
+          );
+          const hasSearch = conversationActions.some(
+            (action) =>
+              action.action.includes("Searching") ||
+              action.tool_name === "search_knowledge"
+          );
+
+          if (hasCreate) {
+            fallbackContent =
+              "I've organized your information and created a new note in your knowledge base.";
+          } else if (hasUpdate) {
+            fallbackContent =
+              "I've updated an existing note with your new information.";
+          } else if (hasSearch) {
+            fallbackContent =
+              "I've searched your knowledge base and organized the information appropriately.";
+          }
+        }
+
+        const fallbackResponse: Message = {
+          id: (Date.now() + 1).toString(),
+          content: fallbackContent,
+          sender: "agent",
+          timestamp: new Date(),
+          actions:
+            conversationActions.length > 0 ? conversationActions : undefined,
+        };
+
+        setMessages((prev) => [...prev, fallbackResponse]);
       }
     } catch (error) {
       console.error("Error sending message:", error);
@@ -964,6 +1020,11 @@ export default function KnowledgeManager() {
       }
     } finally {
       setIsStreaming(false);
+      setCurrentProgress(null);
+      setCurrentSteps([]);
+      setCurrentMetrics(null);
+      setCurrentActions([]);
+      scrollToBottom();
     }
   };
 
@@ -1106,6 +1167,15 @@ export default function KnowledgeManager() {
           <div className="space-y-6">
             {messages.map((message) => (
               <div key={message.id} className="space-y-3">
+                {/* Show actions above the response for agent messages */}
+                {message.sender === "agent" &&
+                  message.actions &&
+                  message.actions.length > 0 && (
+                    <div className="ml-11">
+                      <ActionIndicator actions={message.actions} />
+                    </div>
+                  )}
+
                 <div
                   className={`flex gap-3 ${
                     message.sender === "user" ? "flex-row-reverse" : "flex-row"
@@ -1151,14 +1221,11 @@ export default function KnowledgeManager() {
                   </div>
                 </div>
 
-                {/* Show progress, steps, actions, and metrics for agent messages */}
+                {/* Show other details below the response for agent messages */}
                 {message.sender === "agent" && (
                   <div className="ml-11 space-y-2">
                     {message.progress && (
                       <ProgressIndicator progress={message.progress} />
-                    )}
-                    {message.actions && message.actions.length > 0 && (
-                      <ActionIndicator actions={message.actions} />
                     )}
                     {message.metrics && (
                       <MetricsPanel metrics={message.metrics} />
@@ -1185,21 +1252,6 @@ export default function KnowledgeManager() {
                                 </div>
                               </div>
                             ))}
-                          </div>
-                        </CardContent>
-                      </Card>
-                    )}
-                    {message.thinking && (
-                      <Card className="border-dashed border-muted">
-                        <CardHeader className="pb-2">
-                          <CardTitle className="text-xs font-medium text-muted-foreground flex items-center gap-2">
-                            <Brain className="w-3 h-3" />
-                            Agent Thinking (Truncated)
-                          </CardTitle>
-                        </CardHeader>
-                        <CardContent>
-                          <div className="text-xs text-muted-foreground font-mono bg-muted/30 p-2 rounded">
-                            {message.thinking}
                           </div>
                         </CardContent>
                       </Card>

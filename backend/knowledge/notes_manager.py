@@ -550,36 +550,4 @@ This folder contains notes categorized as "{category}".
                 "notes": [{"title": note.title, "path": note.path} for note in notes_in_category]
             }
         return structure
-    
-    async def decide_note_action(self, content: str, category: str) -> Tuple[str, Optional[Note]]:
-        """Decide whether to create a new note or update an existing one"""
-        # Find related notes
-        related_notes = await self.find_related_notes(content, category, limit=3)
-        
-        if not related_notes:
-            return "create", None
-        
-        # Check if content is very similar to an existing note
-        for note in related_notes:
-            content_similarity = self._calculate_similarity(content, note.content)
-            if content_similarity > 0.7:  # High similarity threshold
-                return "update", note
-        
-        # Check if it's a brief addition that could extend an existing note
-        if len(content.split()) < 50:  # Short content
-            return "update", related_notes[0]
-        
-        return "create", None
-    
-    def _calculate_similarity(self, text1: str, text2: str) -> float:
-        """Calculate simple similarity between two texts"""
-        words1 = set(re.findall(r'\b\w+\b', text1.lower()))
-        words2 = set(re.findall(r'\b\w+\b', text2.lower()))
-        
-        if not words1 or not words2:
-            return 0.0
-        
-        intersection = words1.intersection(words2)
-        union = words1.union(words2)
-        
-        return len(intersection) / len(union) if union else 0.0 
+

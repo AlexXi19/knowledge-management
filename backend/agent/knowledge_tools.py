@@ -868,27 +868,27 @@ def get_knowledge_graph_data() -> str:
     return _run_async_safely(_get_graph())
 
 
-@tool
-def get_all_notes() -> str:
-    """
-    Get all notes in the knowledge base.
-    
-    Returns:
-        JSON string containing all notes
-    """
-    async def _get_all():
-        if not _knowledge_tools_manager.initialized:
-            await _knowledge_tools_manager.initialize()
-        
-        notes = await _knowledge_tools_manager.notes_manager.get_all_notes()
-        
-        return json.dumps({
-            "notes": [note.to_dict() for note in notes],
-            "count": len(notes),
-            "timestamp": datetime.now().isoformat()
-        }, indent=2)
-    
-    return _run_async_safely(_get_all())
+# @tool - REMOVED: get_all_notes tool disabled for performance reasons
+# def get_all_notes() -> str:
+#     """
+#     Get all notes in the knowledge base.
+#     
+#     Returns:
+#         JSON string containing all notes
+#     """
+#     async def _get_all():
+#         if not _knowledge_tools_manager.initialized:
+#             await _knowledge_tools_manager.initialize()
+#         
+#         notes = await _knowledge_tools_manager.notes_manager.get_all_notes()
+#         
+#         return json.dumps({
+#             "notes": [note.to_dict() for note in notes],
+#             "count": len(notes),
+#             "timestamp": datetime.now().isoformat()
+#         }, indent=2)
+#     
+#     return _run_async_safely(_get_all())
 
 
 @tool
@@ -919,32 +919,321 @@ def search_notes(query: str, limit: int = 10) -> str:
 
 
 @tool
+def unified_search(
+    query: str, 
+    limit: int = 20,
+    include_semantic: bool = True,
+    include_grep: bool = True,
+    include_title: bool = True,
+    include_tag: bool = True,
+    semantic_threshold: float = 0.3
+) -> str:
+    """
+    Unified search function that combines semantic search, grep search, title search, and tag search.
+    Returns results with relevant snippets and context.
+    
+    Args:
+        query: Search query
+        limit: Maximum number of results to return (default: 20)
+        include_semantic: Include semantic search results (default: True)
+        include_grep: Include grep/content search results (default: True)
+        include_title: Include title matching results (default: True)
+        include_tag: Include tag matching results (default: True)
+        semantic_threshold: Minimum similarity score for semantic results (default: 0.3)
+        
+    Returns:
+        JSON string containing unified search results with snippets and context
+    """
+    async def _unified_search():
+        if not _knowledge_tools_manager.initialized:
+            await _knowledge_tools_manager.initialize()
+        
+        # Use the enhanced knowledge graph's unified search
+        results = await _knowledge_tools_manager.knowledge_graph.unified_search(
+            query=query,
+            limit=limit,
+            include_semantic=include_semantic,
+            include_grep=include_grep,
+            include_title=include_title,
+            include_tag=include_tag,
+            semantic_threshold=semantic_threshold
+        )
+        
+        # Convert results to JSON-serializable format
+        search_results = []
+        for result in results:
+            search_results.append({
+                "content": result.content,
+                "title": result.title,
+                "category": result.category,
+                "source_type": result.source_type,
+                "relevance_score": result.relevance_score,
+                "node_id": result.node_id,
+                "file_path": result.file_path,
+                "line_number": result.line_number,
+                "context": result.context,
+                "snippet": result.snippet,
+                "chunk_index": result.chunk_index,
+                "total_chunks": result.total_chunks,
+                "metadata": result.metadata
+            })
+        
+        return json.dumps({
+            "query": query,
+            "total_results": len(search_results),
+            "results": search_results,
+            "search_types_used": {
+                "semantic": include_semantic,
+                "grep": include_grep,
+                "title": include_title,
+                "tag": include_tag
+            },
+            "timestamp": datetime.now().isoformat()
+        }, indent=2)
+    
+    return _run_async_safely(_unified_search())
+
+
+@tool
 def decide_note_action(content: str, category: str) -> str:
     """
-    Decide whether to create a new note or update an existing one.
+    Use an LLM to intelligently decide whether to create a new note or update an existing one.
+    Searches for relevant notes using unified search and provides context to the LLM for decision making.
     
     Args:
         content: The content to process
         category: The category for the content
         
     Returns:
-        JSON string containing the decision and any existing note information
+        JSON string containing the LLM's decision and reasoning
     """
     async def _decide():
         if not _knowledge_tools_manager.initialized:
             await _knowledge_tools_manager.initialize()
         
-        action, existing_note = await _knowledge_tools_manager.notes_manager.decide_note_action(
-            content, category
+        # Use unified search to find relevant notes
+        search_results = await _knowledge_tools_manager.knowledge_graph.unified_search(
+            query=content,
+            limit=5,
+            include_semantic=True,
+            include_grep=True,
+            include_title=True,
+            include_tag=False,  # Don't need tag search for this
+            semantic_threshold=0.25  # Lower threshold for more results
         )
         
-        result = {
-            "action": action,
-            "existing_note": existing_note.to_dict() if existing_note else None,
-            "recommendation": "create" if action == "create" else f"update existing note: {existing_note.title}" if existing_note else "create"
-        }
+        # Filter and prepare relevant notes for LLM analysis
+        relevant_notes = []
+        for result in search_results:
+            # Prioritize same category or high relevance
+            if result.category == category or result.relevance_score > 0.3:
+                relevant_notes.append({
+                    "title": result.title,
+                    "category": result.category,
+                    "file_path": result.file_path,
+                    "relevance_score": result.relevance_score,
+                    "source_type": result.source_type,
+                    "snippet": result.snippet,
+                    "context": result.context if result.context else result.content[:300] + "..."
+                })
         
-        return json.dumps(result, indent=2)
+        # Sort by relevance and keep top 3
+        relevant_notes.sort(key=lambda x: x["relevance_score"], reverse=True)
+        top_notes = relevant_notes[:3]
+        
+        # Create LLM prompt
+        llm_prompt = _create_decision_prompt(content, category, top_notes)
+        
+        # Get LLM decision
+        try:
+            decision = await _get_llm_decision(llm_prompt)
+        except Exception as e:
+            print(f"Error getting LLM decision: {e}")
+            # Fallback to a simple heuristic
+            decision = _fallback_decision(content, category, top_notes)
+        
+        return json.dumps(decision, indent=2, ensure_ascii=False)
+    
+    def _create_decision_prompt(content: str, category: str, relevant_notes: list) -> str:
+        """Create a comprehensive prompt for the LLM to make the decision"""
+        prompt = f"""You are an intelligent knowledge management assistant. Your task is to decide whether to CREATE a new note or UPDATE an existing note based on the user's content and existing notes.
+
+USER'S NEW CONTENT:
+Category: {category}
+Content: {content}
+Word count: {len(content.split())} words
+
+EXISTING RELEVANT NOTES:
+"""
+        
+        if relevant_notes:
+            for i, note in enumerate(relevant_notes, 1):
+                prompt += f"""
+{i}. Title: {note['title']}
+   Category: {note['category']}
+   Relevance Score: {note['relevance_score']:.2f}
+   Search Method: {note['source_type']}
+   File Path: {note['file_path']}
+   Snippet: {note['snippet']}
+   Context: {note['context'][:200]}...
+"""
+        else:
+            prompt += "No relevant existing notes found.\n"
+        
+        prompt += """
+DECISION CRITERIA:
+- CREATE a new note if:
+  * Content is substantially different from existing notes
+  * Content is a complete, standalone piece of information
+  * User's content doesn't logically fit into any existing note
+  * Existing notes are only tangentially related
+  * Content represents a new concept or topic
+
+- UPDATE an existing note if:
+  * Content clearly extends, clarifies, or adds to an existing note
+  * Content fixes errors or provides corrections to existing information
+  * Content is a continuation of thoughts in an existing note
+  * Content provides examples or details for existing concepts
+  * Content is brief and would benefit from being part of a larger note
+
+INSTRUCTIONS:
+Analyze the content and existing notes carefully. Consider the semantic meaning, not just keyword matches. Pay attention to the context and how the content would fit into the knowledge structure.
+
+Respond with ONLY a valid JSON object in this exact format:
+{
+    "action": "create" | "update",
+    "confidence": 0.0-1.0,
+    "reasoning": ["reason1", "reason2", "reason3"],
+    "recommended_note": {
+        "title": "note title",
+        "file_path": "path/to/file.md",
+        "category": "category name"
+    } | null,
+    "alternatives": [
+        {
+            "title": "alternative note title", 
+            "reason": "why this could be an alternative"
+        }
+    ]
+}
+
+Your decision:"""
+        
+        return prompt
+    
+    async def _get_llm_decision(prompt: str) -> dict:
+        """Get decision from LLM using the same model as the knowledge agent"""
+        import litellm
+        import os
+        import json
+        import re
+        
+        def _get_openrouter_config():
+            """Get OpenRouter configuration"""
+            api_key = os.getenv("OPENROUTER_API_KEY")
+            if api_key:
+                model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
+                return {
+                    "model": f"openrouter/{model}",
+                    "api_key": api_key
+                }
+            return None
+        
+        def _get_anthropic_config():
+            """Get Anthropic configuration"""
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if api_key:
+                model = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+                return {
+                    "model": model,
+                    "api_key": api_key
+                }
+            return None
+        
+        def _get_openai_config():
+            """Get OpenAI configuration"""
+            api_key = os.getenv("OPENAI_API_KEY")
+            if api_key:
+                model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+                return {
+                    "model": model,
+                    "api_key": api_key
+                }
+            return None
+        
+        # Try to use the same model configuration as the knowledge agent
+        model_configs = [
+            ("openrouter", _get_openrouter_config),
+            ("anthropic", _get_anthropic_config),
+            ("openai", _get_openai_config)
+        ]
+        
+        for model_type, config_func in model_configs:
+            try:
+                model_config = config_func()
+                if model_config:
+                    response = await litellm.acompletion(
+                        model=model_config["model"],
+                        messages=[{"role": "user", "content": prompt}],
+                        api_key=model_config["api_key"],
+                        max_tokens=500,
+                        temperature=0.1  # Low temperature for consistent decisions
+                    )
+                    
+                    response_text = response.choices[0].message.content.strip()
+                    
+                    # Try to parse the JSON response
+                    try:
+                        # Look for JSON in the response
+                        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                        if json_match:
+                            return json.loads(json_match.group())
+                        else:
+                            # If no JSON found, try to parse the whole response
+                            return json.loads(response_text)
+                    except json.JSONDecodeError:
+                        print(f"Failed to parse LLM response as JSON: {response_text}")
+                        continue
+                        
+            except Exception as e:
+                print(f"Error with {model_type} model: {e}")
+                continue
+        
+        # If all models fail, raise an error to trigger fallback
+        raise Exception("All LLM models failed")
+    
+    def _fallback_decision(content: str, category: str, relevant_notes: list) -> dict:
+        """Fallback decision making if LLM fails"""
+        content_words = len(content.split())
+        
+        # Simple fallback logic
+        if relevant_notes and relevant_notes[0]["relevance_score"] > 0.7:
+            return {
+                "action": "update",
+                "confidence": 0.7,
+                "reasoning": [
+                    f"High relevance score ({relevant_notes[0]['relevance_score']:.2f}) with existing note",
+                    "LLM unavailable - using fallback logic"
+                ],
+                "recommended_note": {
+                    "title": relevant_notes[0]["title"],
+                    "file_path": relevant_notes[0]["file_path"],
+                    "category": relevant_notes[0]["category"]
+                },
+                "alternatives": []
+            }
+        else:
+            return {
+                "action": "create",
+                "confidence": 0.6,
+                "reasoning": [
+                    "No highly relevant existing notes found" if not relevant_notes else f"Low relevance score ({relevant_notes[0]['relevance_score']:.2f})",
+                    f"Content length ({content_words} words) suggests standalone note",
+                    "LLM unavailable - using fallback logic"
+                ],
+                "recommended_note": None,
+                "alternatives": []
+            }
     
     return _run_async_safely(_decide())
 
@@ -1094,8 +1383,9 @@ KNOWLEDGE_TOOLS = [
     search_content_in_files,
     find_related_notes,
     get_knowledge_graph_data,
-    get_all_notes,
+    # get_all_notes,  # REMOVED: Disabled for performance reasons - use search_notes instead
     search_notes,
+    unified_search,
     decide_note_action,
     get_cache_stats,
     clear_cache,

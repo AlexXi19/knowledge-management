@@ -14,6 +14,7 @@ import time
 from smolagents import ToolCallingAgent, CodeAgent, InferenceClientModel, LiteLLMModel
 from models.chat_models import ChatMessage, ChatResponse, KnowledgeUpdate, SearchResult
 from agent.knowledge_tools import KNOWLEDGE_TOOLS, _knowledge_tools_manager
+from agent.action_reporter import ActionReporter
 from knowledge.enhanced_knowledge_graph import get_enhanced_knowledge_graph
 from knowledge.file_watcher import get_knowledge_graph_watcher, start_file_watcher
 import litellm
@@ -22,87 +23,6 @@ import litellm
 if os.getenv("DEBUG") == "true":
     litellm._turn_on_debug()
 
-
-class ActionReporter:
-    """
-    Simple action reporter for user-friendly streaming updates
-    """
-    
-    def __init__(self):
-        self.actions = []
-        self.current_action = None
-        
-    def start_action(self, action: str, details: str = None):
-        """Start a new action"""
-        self.current_action = {
-            "action": action,
-            "details": details,
-            "timestamp": datetime.now().isoformat()
-        }
-        self.actions.append(self.current_action)
-        
-    def update_action(self, details: str):
-        """Update current action details"""
-        if self.current_action:
-            self.current_action["details"] = details
-            
-    def complete_action(self, result: str = None):
-        """Complete current action"""
-        if self.current_action:
-            self.current_action["completed"] = True
-            if result:
-                self.current_action["result"] = result
-                
-    def get_action_summary(self) -> str:
-        """Get a simple summary of actions taken"""
-        if not self.actions:
-            return "No actions taken"
-        
-        summary_parts = []
-        for action in self.actions[-3:]:  # Last 3 actions
-            action_text = action["action"]
-            if action.get("details"):
-                action_text += f": {action['details']}"
-            summary_parts.append(action_text)
-        
-        return " → ".join(summary_parts)
-        
-    def get_intelligent_summary(self, agent_step: Any) -> str:
-        """Generate simple, user-friendly summaries of agent steps"""
-        try:
-            step_type = type(agent_step).__name__
-            step_content = str(getattr(agent_step, 'output', ''))
-            
-            # Extract tool usage
-            if hasattr(agent_step, 'tool_name'):
-                tool_name = agent_step.tool_name
-                if tool_name == "search_knowledge":
-                    return f"Searched existing notes"
-                elif tool_name == "create_knowledge_note":
-                    return f"Created new note"
-                elif tool_name == "update_knowledge_note":
-                    return f"Updated existing note"
-                elif tool_name == "browse_web_content":
-                    return f"Browsed web content"
-                elif tool_name == "find_related_notes":
-                    return f"Found related notes"
-                else:
-                    return f"Used {tool_name}"
-            
-            # Simple step descriptions
-            if step_type == "ToolCallStep" or step_type == "ToolCall":
-                return "Using knowledge tools"
-            elif step_type == "ThinkingStep" or step_type == "ThoughtStep":
-                return "Planning approach"
-            elif step_type == "CodeStep":
-                return "Processing content"
-            elif step_type == "OutputStep":
-                return "Organizing information"
-            else:
-                return "Working on your request"
-                
-        except Exception as e:
-            return "Processing"
 
 
 class KnowledgeAgent:
@@ -510,9 +430,11 @@ IMPORTANT: Do not add external knowledge or research. Only organize what the use
             clean_response = {
                 "response": clean_response_text,
                 "categories": response.categories,
-                "knowledge_updates": response.knowledge_updates,
+                "knowledge_updates": [update.dict() for update in response.knowledge_updates],
                 "suggested_actions": response.suggested_actions[:3]  # Limit to 3 suggestions
             }
+            
+            print(f"DEBUG: Sending complete response with {len(clean_response_text)} characters")
             
             yield {"type": "action", "action": "Complete", "details": "Knowledge organization finished successfully", "timestamp": datetime.now().isoformat()}
             yield {"type": "complete", "response": clean_response}
@@ -904,11 +826,12 @@ IMPORTANT: Do not add external knowledge or research. Only organize what the use
             "6. Keep content minimal and focused on user input",
             "",
             "AVAILABLE TOOLS:",
-            "- search_knowledge: Find existing relevant notes",
+            "- unified_search: Comprehensive search combining semantic, grep, title, and tag search",
+            "- search_knowledge: Find existing relevant notes (semantic search)",
             "- create_knowledge_note: Create new notes from user input",
             "- update_knowledge_note: Update existing notes",
             "- find_related_notes: Find connections for wiki-links",
-            "- get_all_notes: Overview of existing notes",
+            "- decide_note_action: Intelligently decide whether to create or update notes",
             "- browse_web_content: Extract and summarize content from web URLs",
             "- summarize_web_links: Process multiple URLs from text input",
             "",
@@ -1150,6 +1073,71 @@ IMPORTANT: Do not add external knowledge or research. Only organize what the use
             return await self.enhanced_graph.search_content_in_files(query, case_sensitive, limit)
         except Exception as e:
             print(f"Error searching content in files: {e}")
+            return []
+    
+    async def unified_search(
+        self, 
+        query: str, 
+        limit: int = 20,
+        include_semantic: bool = True,
+        include_grep: bool = True,
+        include_title: bool = True,
+        include_tag: bool = True,
+        semantic_threshold: float = 0.3
+    ) -> List[Dict[str, Any]]:
+        """
+        Unified search that combines multiple search methods for comprehensive results
+        
+        Args:
+            query: Search query
+            limit: Maximum number of results to return
+            include_semantic: Include semantic search results
+            include_grep: Include grep/content search results  
+            include_title: Include title matching results
+            include_tag: Include tag matching results
+            semantic_threshold: Minimum similarity score for semantic results
+            
+        Returns:
+            List of unified search results with snippets and context
+        """
+        if not self.initialized:
+            await self.initialize()
+        
+        try:
+            # Use the enhanced knowledge graph's unified search
+            results = await self.enhanced_graph.unified_search(
+                query=query,
+                limit=limit,
+                include_semantic=include_semantic,
+                include_grep=include_grep,
+                include_title=include_title,
+                include_tag=include_tag,
+                semantic_threshold=semantic_threshold
+            )
+            
+            # Convert to dictionary format for easier consumption
+            search_results = []
+            for result in results:
+                search_results.append({
+                    "content": result.content,
+                    "title": result.title,
+                    "category": result.category,
+                    "source_type": result.source_type,
+                    "relevance_score": result.relevance_score,
+                    "node_id": result.node_id,
+                    "file_path": result.file_path,
+                    "line_number": result.line_number,
+                    "context": result.context,
+                    "snippet": result.snippet,
+                    "chunk_index": result.chunk_index,
+                    "total_chunks": result.total_chunks,
+                    "metadata": result.metadata
+                })
+            
+            return search_results
+            
+        except Exception as e:
+            print(f"Error in unified search: {e}")
             return []
     
     async def get_pkm_statistics(self) -> Dict[str, Any]:
@@ -1712,36 +1700,85 @@ IMPORTANT: Only work with the user's input. Do not expand, research, or add exte
             # Extract the main response content
             main_response = response.response
             
-            # Clean up the response - remove technical details
+            print(f"DEBUG: Raw response content: {main_response[:300]}...")
+            
+            if not main_response or main_response.strip() == "":
+                print("DEBUG: Empty response, using fallback")
+                # Fallback to summary based on what was done
+                if response.knowledge_updates:
+                    updates = len(response.knowledge_updates)
+                    if updates == 1:
+                        return f"I've organized your information and created a note in the {response.categories[0] if response.categories else 'appropriate'} category."
+                    else:
+                        return f"I've organized your information and created {updates} notes in your knowledge base."
+                else:
+                    return "I've processed your request and organized the information in your knowledge base."
+            
+            # First, try to extract "Final answer:" section if it exists
+            if "Final answer:" in main_response:
+                print("DEBUG: Found 'Final answer:' in response")
+                final_answer_start = main_response.find("Final answer:")
+                if final_answer_start != -1:
+                    final_answer_content = main_response[final_answer_start + 13:].strip()
+                    print(f"DEBUG: Extracted final answer: {final_answer_content[:200]}...")
+                    
+                    # Clean the final answer content
+                    final_lines = final_answer_content.split('\n')
+                    clean_final_lines = []
+                    
+                    for line in final_lines:
+                        line = line.strip()
+                        if (line and 
+                            not (line.startswith('[') and line.endswith(']') and 'Step' in line and 'Duration' in line) and
+                            not line.lower().startswith('input tokens:') and
+                            not line.lower().startswith('output tokens:')):
+                            clean_final_lines.append(line)
+                    
+                    if clean_final_lines:
+                        cleaned_final = '\n'.join(clean_final_lines)
+                        print(f"DEBUG: Returning cleaned final answer: {cleaned_final[:200]}...")
+                        return cleaned_final
+            
+            # If no final answer, clean up the full response
+            print("DEBUG: No 'Final answer:' found, cleaning full response")
             lines = main_response.split('\n')
             clean_lines = []
             
             for line in lines:
                 line = line.strip()
-                # Skip empty lines and technical details
+                # Only skip truly technical lines, preserve most content
                 if (line and 
-                    not line.startswith('{') and 
+                    not line.startswith('```') and 
+                    not line.startswith('json') and
+                    not line.startswith('{"') and
                     not line.startswith('}') and
-                    not line.startswith('"') and
-                    '```' not in line and
-                    'json' not in line.lower() and
-                    'timestamp' not in line.lower()):
+                    not (line.startswith('[') and line.endswith(']') and 'Step' in line and 'Duration' in line) and
+                    not line.lower().startswith('input tokens:') and
+                    not line.lower().startswith('output tokens:')):
                     clean_lines.append(line)
             
             if clean_lines:
-                cleaned_response = '\n'.join(clean_lines[:5])  # Max 5 lines
+                # Join the lines
+                cleaned_response = '\n'.join(clean_lines)
+                print(f"DEBUG: Cleaned response length: {len(cleaned_response)}")
+                
+                # Limit response length for UI
+                if len(cleaned_response) > 1000:
+                    cleaned_response = cleaned_response[:800] + "\n\n[Response truncated for brevity]"
+                
+                print(f"DEBUG: Returning cleaned response: {cleaned_response[:200]}...")
+                return cleaned_response
             else:
-                # Fallback to summary based on what was done
+                print("DEBUG: No clean lines found, using knowledge updates fallback")
+                # If no clean lines found, use fallback
                 if response.knowledge_updates:
                     updates = len(response.knowledge_updates)
                     if updates == 1:
-                        cleaned_response = f"I've organized your information and created a note in the {response.categories[0] if response.categories else 'appropriate'} category."
+                        return f"I've organized your information and created a note in the {response.categories[0] if response.categories else 'appropriate'} category."
                     else:
-                        cleaned_response = f"I've organized your information and created {updates} notes in your knowledge base."
+                        return f"I've organized your information and created {updates} notes in your knowledge base."
                 else:
-                    cleaned_response = "I've processed your request and organized the information in your knowledge base."
-            
-            return cleaned_response
-            
+                    return "I've processed your request and organized the information in your knowledge base." 
         except Exception as e:
+            print(f"Error in _create_clean_response: {e}")
             return "I've successfully organized your information into your knowledge base." 

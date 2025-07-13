@@ -15,6 +15,7 @@ import asyncio
 from pathlib import Path
 import pickle
 from dataclasses import dataclass, asdict
+import re
 
 from models.chat_models import SearchResult
 from .embedding_service import create_embedding_service, EmbeddingService
@@ -61,6 +62,42 @@ class GraphEdge:
     def __post_init__(self):
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
+
+@dataclass
+class UnifiedSearchResult:
+    """Unified search result format for all search types"""
+    content: str
+    title: str
+    category: str
+    source_type: str  # 'semantic', 'grep', 'title', 'tag'
+    relevance_score: float
+    node_id: str
+    file_path: str = ""
+    line_number: int = 0
+    context: str = ""
+    snippet: str = ""
+    metadata: Dict[str, Any] = None
+    chunk_index: int = 0
+    total_chunks: int = 1
+    
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
+
+@dataclass
+class TextChunk:
+    """Text chunk for semantic search"""
+    content: str
+    start_index: int
+    end_index: int
+    chunk_index: int
+    total_chunks: int
+    node_id: str
+    metadata: Dict[str, Any] = None
+
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
 
 class EnhancedKnowledgeGraph:
     """Enhanced knowledge graph with PKM features"""
@@ -803,6 +840,414 @@ class EnhancedKnowledgeGraph:
             return 0
         
         return max(depth(root_id) for root_id in root_nodes)
+
+    async def get_pkm_insights(self) -> Dict[str, Any]:
+        """Get PKM insights and analytics"""
+        insights = {}
+        
+        # Top connected nodes
+        if self.nodes_by_id:
+            node_connections = {}
+            for edge in self.edges_by_id.values():
+                node_connections[edge.source_id] = node_connections.get(edge.source_id, 0) + 1
+                node_connections[edge.target_id] = node_connections.get(edge.target_id, 0) + 1
+            
+            if node_connections:
+                top_connected = sorted(node_connections.items(), key=lambda x: x[1], reverse=True)[:5]
+                insights["top_connected_nodes"] = [
+                    {
+                        "title": self.nodes_by_id[node_id].title,
+                        "connections": count
+                    } for node_id, count in top_connected if node_id in self.nodes_by_id
+                ]
+        
+        # Orphan nodes (no connections)
+        connected_nodes = set()
+        for edge in self.edges_by_id.values():
+            connected_nodes.add(edge.source_id)
+            connected_nodes.add(edge.target_id)
+        
+        orphan_nodes = []
+        for node_id, node in self.nodes_by_id.items():
+            if node_id not in connected_nodes:
+                orphan_nodes.append({
+                    "title": node.title,
+                    "category": node.category
+                })
+        
+        insights["orphan_nodes"] = orphan_nodes[:10]  # Limit to 10
+        
+        # Category distribution
+        insights["category_distribution"] = {}
+        for category, node_ids in self.category_index.items():
+            insights["category_distribution"][category] = len(node_ids)
+        
+        # Recent activity
+        recent_nodes = sorted(
+            self.nodes_by_id.values(),
+            key=lambda x: x.updated_at,
+            reverse=True
+        )[:5]
+        
+        insights["recent_activity"] = [
+            {
+                "title": node.title,
+                "category": node.category,
+                "updated_at": node.updated_at
+            } for node in recent_nodes
+        ]
+        
+        return insights
+    
+    def _chunk_text(self, text: str, node_id: str, chunk_size: int = 500, overlap: int = 50) -> List[TextChunk]:
+        """
+        Split text into overlapping chunks for better semantic search
+        
+        Args:
+            text: Text to chunk
+            node_id: ID of the node this text belongs to
+            chunk_size: Target size for each chunk in characters
+            overlap: Number of characters to overlap between chunks
+            
+        Returns:
+            List of TextChunk objects
+        """
+        if len(text) <= chunk_size:
+            return [TextChunk(
+                content=text,
+                start_index=0,
+                end_index=len(text),
+                chunk_index=0,
+                total_chunks=1,
+                node_id=node_id
+            )]
+        
+        chunks = []
+        start = 0
+        chunk_index = 0
+        
+        # Try to split on sentence boundaries first
+        sentences = re.split(r'[.!?]+\s+', text)
+        current_chunk = ""
+        current_start = 0
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            # If adding this sentence would exceed chunk_size, save current chunk
+            if len(current_chunk) + len(sentence) > chunk_size and current_chunk:
+                chunks.append(TextChunk(
+                    content=current_chunk.strip(),
+                    start_index=current_start,
+                    end_index=current_start + len(current_chunk),
+                    chunk_index=chunk_index,
+                    total_chunks=0,  # Will be updated later
+                    node_id=node_id
+                ))
+                
+                # Start new chunk with overlap
+                overlap_text = current_chunk[-overlap:] if len(current_chunk) > overlap else current_chunk
+                current_chunk = overlap_text + " " + sentence
+                current_start = current_start + len(current_chunk) - len(overlap_text) - len(sentence) - 1
+                chunk_index += 1
+            else:
+                if current_chunk:
+                    current_chunk += " " + sentence
+                else:
+                    current_chunk = sentence
+                    current_start = start
+        
+        # Add the last chunk if it has content
+        if current_chunk.strip():
+            chunks.append(TextChunk(
+                content=current_chunk.strip(),
+                start_index=current_start,
+                end_index=current_start + len(current_chunk),
+                chunk_index=chunk_index,
+                total_chunks=0,  # Will be updated later
+                node_id=node_id
+            ))
+        
+        # Update total_chunks for all chunks
+        total_chunks = len(chunks)
+        for chunk in chunks:
+            chunk.total_chunks = total_chunks
+        
+        return chunks
+    
+    async def unified_search(
+        self, 
+        query: str, 
+        limit: int = 20,
+        include_semantic: bool = True,
+        include_grep: bool = True,
+        include_title: bool = True,
+        include_tag: bool = True,
+        chunk_size: int = 500,
+        semantic_threshold: float = 0.3
+    ) -> List[UnifiedSearchResult]:
+        """
+        Unified search function that combines multiple search methods
+        
+        Args:
+            query: Search query
+            limit: Maximum number of results to return
+            include_semantic: Include semantic search results
+            include_grep: Include grep/content search results
+            include_title: Include title matching results
+            include_tag: Include tag matching results
+            chunk_size: Size for text chunking in semantic search
+            semantic_threshold: Minimum similarity score for semantic results
+            
+        Returns:
+            List of UnifiedSearchResult objects sorted by relevance
+        """
+        all_results = []
+        
+        # 1. Semantic Search with Chunking
+        if include_semantic and self.collection:
+            try:
+                # Create chunks for all nodes if not already done
+                chunked_content = []
+                chunk_to_node = {}
+                
+                for node in self.nodes_by_id.values():
+                    chunks = self._chunk_text(node.content, node.id, chunk_size)
+                    for chunk in chunks:
+                        chunk_id = f"{node.id}_chunk_{chunk.chunk_index}"
+                        chunked_content.append(chunk.content)
+                        chunk_to_node[len(chunked_content) - 1] = {
+                            'node': node,
+                            'chunk': chunk
+                        }
+                
+                # Perform semantic search on chunks
+                provider_info = self.embedding_service.get_provider_info()
+                
+                if provider_info['type'] == 'openai':
+                    query_embedding = await self.embedding_service.embed_text(query)
+                    # For chunked search, we need to search against our chunk embeddings
+                    # For now, fall back to node-level search
+                    results = self.collection.query(
+                        query_embeddings=[query_embedding],
+                        n_results=min(limit, len(self.nodes_by_id))
+                    )
+                else:
+                    results = self.collection.query(
+                        query_texts=[query],
+                        n_results=min(limit, len(self.nodes_by_id))
+                    )
+                
+                if results['documents'] and results['documents'][0]:
+                    for i, doc in enumerate(results['documents'][0]):
+                        metadata = results['metadatas'][0][i]
+                        distance = results['distances'][0][i] if results['distances'] else 0
+                        similarity = 1 - distance
+                        
+                        if similarity >= semantic_threshold:
+                            node_id = results['ids'][0][i]
+                            node = self.nodes_by_id.get(node_id)
+                            
+                            if node:
+                                # Create snippet from the most relevant part
+                                snippet = self._create_semantic_snippet(doc, query, max_length=200)
+                                
+                                all_results.append(UnifiedSearchResult(
+                                    content=doc,
+                                    title=node.title,
+                                    category=node.category,
+                                    source_type="semantic",
+                                    relevance_score=similarity,
+                                    node_id=node_id,
+                                    file_path=node.file_path,
+                                    snippet=snippet,
+                                    metadata={"similarity": similarity, "search_type": "semantic"}
+                                ))
+                
+            except Exception as e:
+                print(f"Error in semantic search: {e}")
+        
+        # 2. Grep/Content Search
+        if include_grep:
+            try:
+                grep_results = await self.search_content_in_files(query, limit=limit//2)
+                
+                for result in grep_results:
+                    node = self.nodes_by_id.get(result['node_id'])
+                    if node:
+                        for match in result['matches']:
+                            snippet = self._create_grep_snippet(
+                                match['line_content'], 
+                                query, 
+                                max_length=200
+                            )
+                            
+                            # Calculate relevance based on number of matches and position
+                            relevance = min(1.0, result['total_matches'] * 0.1 + 0.5)
+                            
+                            all_results.append(UnifiedSearchResult(
+                                content=match['context'],
+                                title=node.title,
+                                category=node.category,
+                                source_type="grep",
+                                relevance_score=relevance,
+                                node_id=result['node_id'],
+                                file_path=result['file_path'],
+                                line_number=match['line_number'],
+                                context=match['context'],
+                                snippet=snippet,
+                                metadata={
+                                    "total_matches": result['total_matches'],
+                                    "line_number": match['line_number'],
+                                    "search_type": "grep"
+                                }
+                            ))
+                
+            except Exception as e:
+                print(f"Error in grep search: {e}")
+        
+        # 3. Title Search
+        if include_title:
+            query_lower = query.lower()
+            for node in self.nodes_by_id.values():
+                if query_lower in node.title.lower():
+                    # Calculate relevance based on how much of title matches
+                    title_lower = node.title.lower()
+                    if title_lower == query_lower:
+                        relevance = 1.0
+                    elif title_lower.startswith(query_lower):
+                        relevance = 0.9
+                    else:
+                        relevance = 0.7
+                    
+                    snippet = self._create_title_snippet(node.title, query, max_length=200)
+                    
+                    all_results.append(UnifiedSearchResult(
+                        content=node.content[:300] + "..." if len(node.content) > 300 else node.content,
+                        title=node.title,
+                        category=node.category,
+                        source_type="title",
+                        relevance_score=relevance,
+                        node_id=node.id,
+                        file_path=node.file_path,
+                        snippet=snippet,
+                        metadata={"search_type": "title"}
+                    ))
+        
+        # 4. Tag Search
+        if include_tag:
+            query_lower = query.lower()
+            # Remove # if present in query
+            clean_query = query_lower.replace('#', '')
+            
+            for tag, node_ids in self.tag_index.items():
+                if clean_query in tag.lower():
+                    relevance = 1.0 if tag.lower() == clean_query else 0.8
+                    
+                    for node_id in node_ids:
+                        node = self.nodes_by_id.get(node_id)
+                        if node:
+                            snippet = f"Tagged with: #{tag}"
+                            
+                            all_results.append(UnifiedSearchResult(
+                                content=node.content[:300] + "..." if len(node.content) > 300 else node.content,
+                                title=node.title,
+                                category=node.category,
+                                source_type="tag",
+                                relevance_score=relevance,
+                                node_id=node_id,
+                                file_path=node.file_path,
+                                snippet=snippet,
+                                metadata={"tag": tag, "search_type": "tag"}
+                            ))
+        
+        # 5. Remove duplicates and sort by relevance
+        unique_results = {}
+        for result in all_results:
+            # Use node_id + source_type as key to allow same node from different search types
+            key = f"{result.node_id}_{result.source_type}"
+            if key not in unique_results or result.relevance_score > unique_results[key].relevance_score:
+                unique_results[key] = result
+        
+        # Sort by relevance score (descending) and return top results
+        sorted_results = sorted(unique_results.values(), key=lambda x: x.relevance_score, reverse=True)
+        return sorted_results[:limit]
+    
+    def _create_semantic_snippet(self, content: str, query: str, max_length: int = 200) -> str:
+        """Create a snippet highlighting the most relevant part for semantic search"""
+        # Find the part of content that best matches the query
+        query_words = query.lower().split()
+        sentences = re.split(r'[.!?]+', content)
+        
+        best_sentence = ""
+        best_score = 0
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if len(sentence) < 10:
+                continue
+                
+            sentence_lower = sentence.lower()
+            score = sum(1 for word in query_words if word in sentence_lower)
+            
+            if score > best_score:
+                best_score = score
+                best_sentence = sentence
+        
+        if best_sentence:
+            if len(best_sentence) > max_length:
+                return best_sentence[:max_length-3] + "..."
+            return best_sentence
+        
+        # Fallback to beginning of content
+        if len(content) > max_length:
+            return content[:max_length-3] + "..."
+        return content
+    
+    def _create_grep_snippet(self, line_content: str, query: str, max_length: int = 200) -> str:
+        """Create a snippet highlighting the search term in grep results"""
+        # Find the position of the query in the line
+        query_lower = query.lower()
+        line_lower = line_content.lower()
+        
+        try:
+            # Try regex search first
+            pattern = re.compile(re.escape(query_lower), re.IGNORECASE)
+            match = pattern.search(line_content)
+            
+            if match:
+                start_pos = match.start()
+                end_pos = match.end()
+                
+                # Create snippet centered around the match
+                snippet_start = max(0, start_pos - max_length // 3)
+                snippet_end = min(len(line_content), end_pos + max_length // 3)
+                
+                snippet = line_content[snippet_start:snippet_end]
+                
+                # Add ellipsis if we truncated
+                if snippet_start > 0:
+                    snippet = "..." + snippet
+                if snippet_end < len(line_content):
+                    snippet = snippet + "..."
+                
+                return snippet
+        except:
+            pass
+        
+        # Fallback to simple truncation
+        if len(line_content) > max_length:
+            return line_content[:max_length-3] + "..."
+        return line_content
+    
+    def _create_title_snippet(self, title: str, query: str, max_length: int = 200) -> str:
+        """Create a snippet for title matches"""
+        if len(title) > max_length:
+            return title[:max_length-3] + "..."
+        return title
+
 
 # Global instance
 _enhanced_knowledge_graph = None
