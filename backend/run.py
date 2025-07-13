@@ -1,87 +1,133 @@
 #!/usr/bin/env python3
 """
-Startup script for the Knowledge Management Backend
+Run script for the smolagents-powered knowledge management system
 """
 
 import os
 import sys
-import subprocess
-import asyncio
 from pathlib import Path
 
 def check_dependencies():
     """Check if required dependencies are installed"""
     try:
-        import fastapi
-        import uvicorn
-        import chromadb
-        import networkx
-        import sentence_transformers
-        print("✓ All required dependencies are installed")
-        return True
-    except ImportError as e:
-        print(f"✗ Missing dependency: {e}")
-        print("Please install dependencies with: uv sync")
+        import smolagents
+        print(f"✅ smolagents version: {smolagents.__version__}")
+    except ImportError:
+        print("❌ smolagents not found. Please install with: uv add smolagents[toolkit,litellm]")
         return False
-
-def setup_environment():
-    """Setup environment variables and directories"""
-    # Create necessary directories
-    directories = [
-        "knowledge_base",
-        "notes",
-        "logs"
-    ]
     
-    for directory in directories:
-        Path(directory).mkdir(exist_ok=True)
-        print(f"✓ Created directory: {directory}")
-    
-    # Check for .env file
-    if not Path(".env").exists():
-        print("⚠ .env file not found. Please create one based on .env.example")
-        print("Required environment variables:")
-        print("- OPENAI_API_KEY (optional, for AI-powered categorization)")
-        print("- KNOWLEDGE_BASE_PATH (default: ./knowledge_base)")
-        print("- NOTES_DIRECTORY (default: ./notes)")
-        print("- EMBEDDING_MODEL (default: all-MiniLM-L6-v2)")
-        print("ℹ️  Continuing with defaults...")
-        return True
+    try:
+        import chromadb
+        print(f"✅ chromadb available")
+    except ImportError:
+        print("❌ chromadb not found. Please install with: uv add chromadb")
+        return False
     
     return True
 
+def check_api_keys():
+    """Check for available API keys and recommend setup"""
+    api_keys = {}
+    
+    # Check OpenRouter API key (highest priority - access to all models)
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    if openrouter_key:
+        api_keys["OpenRouter"] = "✅ Found"
+        openrouter_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
+        print(f"✅ OpenRouter API key found - will use {openrouter_model}")
+    else:
+        api_keys["OpenRouter"] = "❌ Missing"
+    
+    # Check Anthropic API key (second priority for Claude Sonnet)
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    if anthropic_key:
+        api_keys["Anthropic"] = "✅ Found"
+        claude_model = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+        print(f"✅ Anthropic API key found - will use {claude_model}")
+    else:
+        api_keys["Anthropic"] = "❌ Missing"
+    
+    # Check HuggingFace token
+    hf_token = os.getenv("HF_TOKEN")
+    if hf_token:
+        api_keys["HuggingFace"] = "✅ Found"
+        print("✅ HuggingFace token found")
+    else:
+        api_keys["HuggingFace"] = "❌ Missing"
+    
+    # Check OpenAI API key
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if openai_key:
+        api_keys["OpenAI"] = "✅ Found"
+        openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        print(f"✅ OpenAI API key found - will use {openai_model}")
+    else:
+        api_keys["OpenAI"] = "❌ Missing"
+    
+    # Check embedding provider
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "sentence_transformer")
+    print(f"📊 Embedding provider: {embedding_provider}")
+    
+    if not any("✅" in status for status in api_keys.values()):
+        print("\n⚠️  No API keys found. The system will use free HuggingFace models (rate limited).")
+        print("\nTo use premium models, set one of these environment variables (in priority order):")
+        print("  1. OPENROUTER_API_KEY=your_openrouter_key (access to all models)")
+        print("  2. ANTHROPIC_API_KEY=your_anthropic_key (for Claude Sonnet models)")
+        print("  3. OPENAI_API_KEY=your_openai_key (for GPT models)")
+        print("  4. HF_TOKEN=your_huggingface_token (for HuggingFace models)")
+        print("\nOptional model selection:")
+        print("  • OPENROUTER_MODEL=anthropic/claude-3.5-sonnet (default)")
+        print("  • CLAUDE_MODEL=claude-3-5-sonnet-20241022 (default)")
+        print("  • OPENAI_MODEL=gpt-4o-mini (default)")
+        print("  • EMBEDDING_PROVIDER=openai|sentence_transformer")
+    
+    return api_keys
+
 def main():
-    """Main startup function"""
-    print("🚀 Starting Knowledge Management Backend...")
-    print("📦 Using uv for package management")
-    print("=" * 50)
+    """Main entry point"""
+    print("🚀 Starting smolagents-powered knowledge management system...")
+    print("=" * 70)
     
     # Check dependencies
     if not check_dependencies():
         sys.exit(1)
     
-    # Setup environment
-    if not setup_environment():
-        print("⚠ Environment setup incomplete. Continuing with defaults...")
+    # Check API keys and configuration
+    api_keys = check_api_keys()
     
-    # Start the server
-    print("\n🌐 Starting FastAPI server...")
-    print("Access the API at: http://localhost:8000")
-    print("API documentation at: http://localhost:8000/docs")
-    print("Press Ctrl+C to stop the server")
-    print("=" * 50)
+    print("\n" + "=" * 70)
+    print("🤖 Initializing knowledge management agent...")
     
+    # Detect development mode
+    is_dev = (
+        os.getenv("ENVIRONMENT") == "development" or
+        os.getenv("DEV") == "true" or
+        "--dev" in sys.argv or
+        "--reload" in sys.argv
+    )
+    
+    # Import and run the main application
     try:
+        from main import app
         import uvicorn
-        uvicorn.run(
-            "main:app",
-            host="0.0.0.0",
-            port=8000,
-            reload=True,
-            log_level="info"
-        )
+        
+        print("✅ All systems ready!")
+        print("🌐 Starting server on http://localhost:8000")
+        print("📚 API documentation available at http://localhost:8000/docs")
+        print("💾 Cache management at http://localhost:8000/cache/stats")
+        
+        if is_dev:
+            print("🔄 Hot reload enabled for development")
+        else:
+            print("🏭 Production mode - use --dev flag for hot reload")
+            
+        print("\nPress Ctrl+C to stop the server")
+        print("=" * 70)
+        
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info", reload=is_dev)
+        
     except KeyboardInterrupt:
-        print("\n🛑 Server stopped by user")
+        print("\n👋 Shutting down gracefully...")
     except Exception as e:
         print(f"❌ Error starting server: {e}")
         sys.exit(1)

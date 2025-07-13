@@ -2,7 +2,7 @@
 name = "knowledge-management-backend"
 version = "1.0.0"
 description = "A smart knowledge management system with AI-powered categorization"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 dependencies = [
     "fastapi>=0.104.0",
@@ -19,6 +19,8 @@ dependencies = [
     "chromadb>=0.4.0",
     "sentence-transformers>=2.2.0",
     "aiofiles>=24.1.0",
+    "smolagents[toolkit,litellm]>=1.0.0",
+    "watchdog>=6.0.0",
 ]
 
 [tool.uv]

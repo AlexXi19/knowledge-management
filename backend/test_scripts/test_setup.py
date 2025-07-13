@@ -28,8 +28,8 @@ def test_imports():
         from agent.knowledge_agent import KnowledgeAgent
         print("✓ KnowledgeAgent import successful")
         
-        from knowledge.knowledge_graph import KnowledgeGraph
-        print("✓ KnowledgeGraph import successful")
+        from knowledge.enhanced_knowledge_graph import get_enhanced_knowledge_graph
+        print("✓ EnhancedKnowledgeGraph import successful")
         
         print("All imports successful!")
         return True
@@ -42,17 +42,17 @@ def test_imports():
 def test_knowledge_graph():
     """Test that we can create a knowledge graph"""
     try:
-        print("\nTesting knowledge graph...")
+        print("\nTesting enhanced knowledge graph...")
         
-        from knowledge.knowledge_graph import KnowledgeGraph
+        from knowledge.enhanced_knowledge_graph import get_enhanced_knowledge_graph
         
-        # Create a knowledge graph
-        kg = KnowledgeGraph()
-        print("✓ Knowledge graph creation successful")
+        # Get the enhanced knowledge graph
+        kg = get_enhanced_knowledge_graph()
+        print("✓ Enhanced knowledge graph creation successful")
         return True
         
     except Exception as e:
-        print(f"✗ Knowledge graph error: {e}")
+        print(f"✗ Enhanced knowledge graph error: {e}")
         traceback.print_exc()
         return False
 

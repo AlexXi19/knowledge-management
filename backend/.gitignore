@@ -1,8 +1,7 @@
 # App
-notes/
 logs/
 .env
-knowledge_base/
+test-vault/
 
 # Python
 __pycache__/

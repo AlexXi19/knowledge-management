@@ -1,11 +1,23 @@
-from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, Field, validator
+from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
 
 class ChatMessage(BaseModel):
     content: str
-    sender: str  # 'user' or 'agent'
-    timestamp: datetime
+    sender: str = Field(alias="role", default="user")  # 'user' or 'agent'/'assistant'
+    timestamp: datetime = Field(default_factory=datetime.now)
+    
+    @validator('sender', pre=True)
+    def normalize_sender(cls, v):
+        """Normalize different sender formats"""
+        if v in ['assistant', 'ai', 'agent']:
+            return 'agent'
+        elif v in ['user', 'human']:
+            return 'user'
+        return v
+    
+    class Config:
+        validate_by_name = True
 
 class ChatRequest(BaseModel):
     message: str
@@ -31,7 +43,15 @@ class ChatResponse(BaseModel):
 
 class SearchResult(BaseModel):
     content: str
-    category: str
-    similarity: float
-    node_id: str
-    metadata: Dict[str, Any] = {} 
+    category: str = "General"
+    similarity: float = Field(alias="score", default=1.0)
+    node_id: str = ""
+    metadata: Dict[str, Any] = {}
+    
+    @validator('similarity', pre=True)
+    def normalize_similarity(cls, v):
+        """Handle different score field names"""
+        return float(v) if v is not None else 1.0
+    
+    class Config:
+        validate_by_name = True 

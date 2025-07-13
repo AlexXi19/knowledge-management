@@ -9,9 +9,11 @@ import aiofiles
 import re
 from dataclasses import dataclass
 
+from knowledge.hash_utils import calculate_content_hash, get_hash_tracker, HashTracker
+
 @dataclass
 class Note:
-    """Represents a single note"""
+    """Represents a single note with hash tracking"""
     path: str
     title: str
     content: str
@@ -20,6 +22,12 @@ class Note:
     created_at: datetime
     updated_at: datetime
     metadata: Dict
+    content_hash: str = ""  # Add content hash field
+    
+    def __post_init__(self):
+        """Calculate content hash after initialization"""
+        if not self.content_hash:
+            self.content_hash = calculate_content_hash(self.content)
     
     def to_dict(self) -> Dict:
         return {
@@ -30,15 +38,26 @@ class Note:
             "tags": self.tags,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
-            "metadata": self.metadata
+            "metadata": self.metadata,
+            "content_hash": self.content_hash
         }
+    
+    def has_content_changed(self, new_content: str) -> bool:
+        """Check if content has changed by comparing hashes"""
+        new_hash = calculate_content_hash(new_content)
+        return self.content_hash != new_hash
+    
+    def update_content_hash(self):
+        """Update the content hash based on current content"""
+        self.content_hash = calculate_content_hash(self.content)
 
 class NotesManager:
-    """Manages note files and directory structure"""
+    """Manages note files and directory structure with hash-based caching"""
     
     def __init__(self, notes_directory: str = None):
         self.notes_directory = Path(notes_directory or os.getenv("NOTES_DIRECTORY", "./notes"))
         self.notes_index: Dict[str, Note] = {}
+        self.hash_tracker = get_hash_tracker()
         self.categories = {
             "Ideas to Develop": "ideas",
             "Personal": "personal", 
@@ -51,7 +70,7 @@ class NotesManager:
         self.initialized = False
     
     async def initialize(self):
-        """Initialize the notes manager"""
+        """Initialize the notes manager with hash tracking"""
         if self.initialized:
             return
             
@@ -68,11 +87,19 @@ class NotesManager:
             if not readme_path.exists():
                 await self._create_category_readme(category, folder_name)
         
-        # Scan existing notes
+        # Scan existing notes with hash checking
         await self._scan_existing_notes()
+        
+        # Cleanup stale cache entries
+        valid_note_paths = set(self.notes_index.keys())
+        self.hash_tracker.cleanup_stale_entries(valid_note_paths)
         
         self.initialized = True
         print(f"📁 Notes Manager initialized with {len(self.notes_index)} existing notes")
+        
+        # Print cache stats
+        cache_stats = self.hash_tracker.get_cache_stats()
+        print(f"💾 Cache stats: {cache_stats['total_cached_items']} items, {cache_stats['total_mapped_notes']} mappings")
     
     async def _create_category_readme(self, category: str, folder_name: str):
         """Create a README file for a category"""
@@ -103,23 +130,95 @@ This folder contains notes categorized as "{category}".
             await f.write(readme_content)
     
     async def _scan_existing_notes(self):
-        """Scan existing notes directory and build index"""
+        """Scan existing notes directory with hash-based change detection"""
+        processed_count = 0
+        cached_count = 0
+        
         for root, dirs, files in os.walk(self.notes_directory):
             for file in files:
                 if file.endswith(('.md', '.txt', '.markdown')):
                     file_path = Path(root) / file
                     try:
-                        note = await self._parse_note_file(file_path)
+                        # Read file content to check if it changed
+                        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                            current_content = await f.read()
+                        
+                        # Check if content has changed using hash
+                        if not self.hash_tracker.has_content_changed(str(file_path), current_content):
+                            # Content hasn't changed, try to load from cache
+                            cached_note = self._load_note_from_cache(file_path, current_content)
+                            if cached_note:
+                                self.notes_index[str(file_path)] = cached_note
+                                cached_count += 1
+                                continue
+                        
+                        # Content has changed or no cache, parse the file
+                        note = await self._parse_note_file(file_path, current_content)
                         if note:
                             self.notes_index[str(file_path)] = note
+                            # Update hash cache
+                            self.hash_tracker.update_hash(
+                                str(file_path), 
+                                note.content_hash,
+                                {
+                                    "title": note.title,
+                                    "category": note.category,
+                                    "updated_at": note.updated_at.isoformat()
+                                }
+                            )
+                            processed_count += 1
                     except Exception as e:
-                        print(f"Error parsing note {file_path}: {e}")
+                        print(f"Error processing note {file_path}: {e}")
+        
+        if cached_count > 0:
+            print(f"⚡ Used cache for {cached_count} unchanged notes, processed {processed_count} new/modified notes")
     
-    async def _parse_note_file(self, file_path: Path) -> Optional[Note]:
+    def _load_note_from_cache(self, file_path: Path, content: str) -> Optional[Note]:
+        """Load note from cached hash data if available"""
+        try:
+            cached_hash = self.hash_tracker.get_cached_hash(str(file_path))
+            if not cached_hash:
+                return None
+            
+            # Get file timestamps
+            stat = file_path.stat()
+            created_at = datetime.fromtimestamp(stat.st_ctime)
+            updated_at = datetime.fromtimestamp(stat.st_mtime)
+            
+            # Try to get metadata from cache
+            cache_entry = self.hash_tracker.hash_cache.get(str(file_path), {})
+            cached_metadata = cache_entry.get('metadata', {})
+            
+            # Create note with cached information
+            # Extract title and basic info from content quickly
+            title = cached_metadata.get('title', file_path.stem)
+            category = self._determine_category_from_path(file_path)
+            
+            # Create note object
+            note = Note(
+                path=str(file_path),
+                title=title,
+                content=content,
+                category=category,
+                tags=[],  # Will be parsed if needed
+                created_at=created_at,
+                updated_at=updated_at,
+                metadata=cached_metadata,
+                content_hash=cached_hash
+            )
+            
+            return note
+            
+        except Exception as e:
+            print(f"Error loading cached note {file_path}: {e}")
+            return None
+    
+    async def _parse_note_file(self, file_path: Path, content: str = None) -> Optional[Note]:
         """Parse a note file and extract metadata"""
         try:
-            async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-                content = await f.read()
+            if content is None:
+                async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                    content = await f.read()
             
             # Extract frontmatter if present
             metadata = {}
@@ -163,6 +262,7 @@ This folder contains notes categorized as "{category}".
                 created_at=created_at,
                 updated_at=updated_at,
                 metadata=metadata
+                # content_hash will be calculated automatically in __post_init__
             )
             
         except Exception as e:
@@ -182,7 +282,7 @@ This folder contains notes categorized as "{category}".
         return "Quick Notes"
     
     async def create_note(self, title: str, content: str, category: str, tags: List[str] = None) -> Note:
-        """Create a new note"""
+        """Create a new note with hash tracking"""
         if tags is None:
             tags = []
         
@@ -230,16 +330,28 @@ This folder contains notes categorized as "{category}".
             created_at=now,
             updated_at=now,
             metadata=frontmatter
+            # content_hash will be calculated automatically
         )
         
         # Add to index
         self.notes_index[str(file_path)] = note
         
+        # Update hash cache
+        self.hash_tracker.update_hash(
+            str(file_path),
+            note.content_hash,
+            {
+                "title": title,
+                "category": category,
+                "updated_at": now.isoformat()
+            }
+        )
+        
         print(f"📝 Created note: {title} in {category}")
         return note
     
     async def update_note(self, note_path: str, additional_content: str) -> Note:
-        """Update an existing note with additional content"""
+        """Update an existing note with additional content and hash tracking"""
         if note_path not in self.notes_index:
             raise ValueError(f"Note not found: {note_path}")
         
@@ -250,8 +362,14 @@ This folder contains notes categorized as "{category}".
         async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
             current_content = await f.read()
         
+        # Check if we actually need to update (avoid unnecessary writes)
+        new_content_section = f"\n\n## Update - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n{additional_content}"
+        if new_content_section.strip() in current_content:
+            print(f"⚠️  Content already exists in note: {note.title}")
+            return note
+        
         # Add new content
-        updated_content = current_content + f"\n\n## Update - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n{additional_content}"
+        updated_content = current_content + new_content_section
         
         # Update frontmatter
         if current_content.startswith('---'):
@@ -260,7 +378,7 @@ This folder contains notes categorized as "{category}".
                 try:
                     metadata = yaml.safe_load(parts[1])
                     metadata['updated'] = datetime.now().isoformat()
-                    updated_content = f"---\n{yaml.dump(metadata, default_flow_style=False)}---\n\n{parts[2].strip()}\n\n## Update - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n{additional_content}"
+                    updated_content = f"---\n{yaml.dump(metadata, default_flow_style=False)}---\n\n{parts[2].strip()}{new_content_section}"
                 except:
                     pass
         
@@ -269,8 +387,20 @@ This folder contains notes categorized as "{category}".
             await f.write(updated_content)
         
         # Update note object
-        note.content = note.content + f"\n\n## Update - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n{additional_content}"
+        note.content = note.content + new_content_section
         note.updated_at = datetime.now()
+        note.update_content_hash()  # Recalculate hash
+        
+        # Update hash cache
+        self.hash_tracker.update_hash(
+            str(file_path),
+            note.content_hash,
+            {
+                "title": note.title,
+                "category": note.category,
+                "updated_at": note.updated_at.isoformat()
+            }
+        )
         
         print(f"✏️  Updated note: {note.title}")
         return note
